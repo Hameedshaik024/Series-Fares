@@ -173,8 +173,6 @@ def build_html(origin, dest, year, month, fares, markup=0, theme="sunset",
         f'&nbsp;|&nbsp; Range: &#8377;{min_fare:,.0f} &ndash; &#8377;{max_fare:,.0f}'
         if has_fares else "No fares found for this route/month"
     )
-    markup_note = f' (incl. +&#8377;{markup:,.0f} markup)' if markup else ""
-
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>{origin}-{dest} {month_label} Fares</title>
@@ -218,7 +216,7 @@ def build_html(origin, dest, year, month, fares, markup=0, theme="sunset",
   <div class="header">
     <div>
       <div class="route">{origin} <span class="arrow">&#9992;</span> {dest}</div>
-      <div class="subtitle">{origin_label} &rarr; {dest_label} &middot; One-way Economy Fares{markup_note}</div>
+      <div class="subtitle">{origin_label} &rarr; {dest_label} &middot; One-way Economy Fares</div>
     </div>
     <div>
       <div class="month-label">{month_label}</div>

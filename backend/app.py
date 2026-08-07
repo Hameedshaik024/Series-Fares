@@ -1,5 +1,8 @@
 import os
+import time
+import uuid
 import functools
+import threading
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 
@@ -9,6 +12,44 @@ import poster
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 AIRIQ_USER = os.environ.get("AIRIQ_USER", "")
 AIRIQ_PASS = os.environ.get("AIRIQ_PASS", "")
+
+# In-memory job store for /api/generate. A "Generate" call scrapes a whole
+# month day-by-day (AirIQ has no bulk endpoint), which reliably takes
+# longer than any HTTP/proxy timeout on slow free-tier hardware. So the
+# HTTP request only *starts* the job and returns immediately; the frontend
+# polls for progress/result. This makes it immune to gunicorn/Render
+# timeouts regardless of how long the underlying scrape takes.
+_jobs = {}
+_jobs_lock = threading.Lock()
+_JOB_TTL_SECONDS = 3600
+
+
+def _prune_old_jobs():
+    cutoff = time.time() - _JOB_TTL_SECONDS
+    with _jobs_lock:
+        for jid in [j for j, v in _jobs.items() if v["created"] < cutoff]:
+            del _jobs[jid]
+
+
+def _run_generate_job(job_id, origin, dest, year, month, markup, theme, show_logo):
+    def progress_cb(day, total, status):
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = {"day": day, "total": total, "last_status": status}
+
+    try:
+        fares = airiq_client.scrape_month(origin, dest, year, month, progress_cb=progress_cb)
+        png_bytes = poster.build(origin, dest, year, month, fares, markup, theme, show_logo=show_logo)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = png_bytes
+    except RuntimeError as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = "not_logged_in" if str(e) == "not_logged_in" else str(e)
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)  # harmless no-op now that frontend is same-origin; kept in case of a split deploy later
@@ -88,6 +129,7 @@ def destinations():
 @app.route("/api/generate", methods=["POST"])
 @require_auth
 def generate():
+    _prune_old_jobs()
     body = request.get_json(force=True) or {}
     origin = body.get("origin")
     dest = body.get("dest")
@@ -101,21 +143,43 @@ def generate():
         return jsonify({"error": "missing_params", "detail": "origin, dest, year, month are required"}), 400
     if theme not in poster.THEMES:
         return jsonify({"error": "bad_theme", "detail": f"theme must be one of {list(poster.THEMES)}"}), 400
+    if not airiq_client.has_session():
+        return jsonify({"error": "not_logged_in"}), 401
 
-    try:
-        fares = airiq_client.scrape_month(origin, dest, int(year), int(month))
-    except RuntimeError as e:
-        if str(e) == "not_logged_in":
-            return jsonify({"error": "not_logged_in"}), 401
-        return jsonify({"error": "scrape_failed", "detail": str(e)}), 500
-    except Exception as e:
-        return jsonify({"error": "scrape_failed", "detail": str(e)}), 500
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "running", "progress": None, "result": None, "error": None, "created": time.time()}
 
-    try:
-        png_bytes = poster.build(origin, dest, int(year), int(month), fares, markup, theme, show_logo=show_logo)
-    except Exception as e:
-        return jsonify({"error": "render_failed", "detail": str(e)}), 500
+    thread = threading.Thread(
+        target=_run_generate_job,
+        args=(job_id, origin, dest, int(year), int(month), markup, theme, show_logo),
+        daemon=True,
+    )
+    thread.start()
 
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/api/generate/status/<job_id>")
+@require_auth
+def generate_status(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown_job"}), 404
+        return jsonify({"status": job["status"], "progress": job["progress"], "error": job["error"]})
+
+
+@app.route("/api/generate/result/<job_id>")
+@require_auth
+def generate_result(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown_job"}), 404
+        if job["status"] != "done":
+            return jsonify({"error": "not_ready", "status": job["status"]}), 409
+        png_bytes = job["result"]
     return Response(png_bytes, mimetype="image/png")
 
 

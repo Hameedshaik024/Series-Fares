@@ -251,15 +251,17 @@ def scrape_month(origin, dest, year, month, progress_cb=None):
     with sync_playwright() as p:
         browser, ctx = _new_context(p)
         page = ctx.new_page()
-        page.goto(SEARCH_URL, wait_until="networkidle")
+        page.goto(SEARCH_URL, wait_until="load")
+        page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
 
         if "Search" not in page.title():
             browser.close()
             raise RuntimeError("not_logged_in")
 
-        with page.expect_navigation(wait_until="networkidle", timeout=30000):
+        with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#dest_cmd", origin)
-        with page.expect_navigation(wait_until="networkidle", timeout=8000):
+        page.wait_for_selector("#to_cmd option", state="attached", timeout=15000)
+        with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#to_cmd", dest)
 
         for day in range(1, days_in_month + 1):
@@ -272,7 +274,7 @@ def scrape_month(origin, dest, year, month, progress_cb=None):
                 continue
 
             try:
-                with page.expect_navigation(wait_until="networkidle", timeout=30000):
+                with page.expect_navigation(wait_until="load", timeout=30000):
                     page.click("#SearchBtn")
             except Exception as e:
                 results[day] = {"status": "error", "error": str(e)}

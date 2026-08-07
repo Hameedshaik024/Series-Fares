@@ -140,7 +140,7 @@ $("generateBtn").addEventListener("click", async () => {
 
   $("generateBtn").disabled = true;
   $("result").innerHTML = "";
-  setStatus('<span class="spinner"></span> Scraping AirIQ day-by-day for this route — this takes 1-3 minutes, please wait…', "");
+  setStatus('<span class="spinner"></span> Starting…', "");
 
   try {
     const res = await api("/api/generate", {
@@ -156,25 +156,69 @@ $("generateBtn").addEventListener("click", async () => {
       } else {
         setStatus("Wrong app password — reload and re-enter it.", "err");
       }
+      $("generateBtn").disabled = false;
       return;
     }
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setStatus("Failed: " + (data.detail || data.error || res.statusText), "err");
+      $("generateBtn").disabled = false;
       return;
     }
 
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    $("result").innerHTML = `<img src="${url}"><br><a href="${url}" download="${origin}-${dest}-${year}-${month}-fares.png">Download PNG</a>`;
-    setStatus("Done.", "ok");
+    const { job_id } = await res.json();
+    await pollJob(job_id, origin, dest, year, month);
   } catch (e) {
     setStatus("Error: " + e.message, "err");
-  } finally {
     $("generateBtn").disabled = false;
   }
 });
+
+async function pollJob(jobId, origin, dest, year, month) {
+  // AirIQ has no bulk fare endpoint, so this genuinely searches one day at
+  // a time server-side (1-3+ min). Polling here means no HTTP/proxy
+  // timeout on this end can kill it - the job keeps running server-side
+  // regardless of how long the tab polls.
+  while (true) {
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const res = await api(`/api/generate/status/${jobId}`);
+    if (!res.ok) {
+      setStatus("Lost track of the job — try again.", "err");
+      $("generateBtn").disabled = false;
+      return;
+    }
+    const data = await res.json();
+
+    if (data.status === "running") {
+      const p = data.progress;
+      const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ day-by-day…";
+      setStatus(`<span class="spinner"></span> ${progressText} — this takes 1-3 minutes, please wait…`, "");
+      continue;
+    }
+
+    if (data.status === "error") {
+      if (data.error === "not_logged_in") {
+        setStatus("AirIQ session expired.", "err");
+        showRelogin();
+      } else {
+        setStatus("Failed: " + data.error, "err");
+      }
+      $("generateBtn").disabled = false;
+      return;
+    }
+
+    // done
+    const imgRes = await api(`/api/generate/result/${jobId}`);
+    const blob = await imgRes.blob();
+    const url = URL.createObjectURL(blob);
+    $("result").innerHTML = `<img src="${url}"><br><a href="${url}" download="${origin}-${dest}-${year}-${month}-fares.png">Download PNG</a>`;
+    setStatus("Done.", "ok");
+    $("generateBtn").disabled = false;
+    return;
+  }
+}
 
 function setStatus(html, cls) {
   const el = $("status");
