@@ -208,13 +208,22 @@ def _extract_flights(page):
         time_el = box.query_selector(".flit-item6")
         time_txt = time_el.inner_text().strip().replace("\n", " - ") if time_el else None
 
-        bag_el = box.query_selector(".flit-item3 span") or box.query_selector(".flit-item3")
+        # .flit-item3 holds two distinct pieces AirIQ doesn't cleanly
+        # separate: a routing/stops line (".flit-item-txt", e.g. "Non - Stop"
+        # or "1 Stop") and, only for some airlines, a baggage allowance span
+        # (e.g. "5 KG , 20 KG"). Keep them separate - and only treat the
+        # span as baggage if it actually looks like a weight, since some
+        # airlines' cards have no baggage span at all and naively falling
+        # back to the parent picks up the routing text instead.
+        stops_el = box.query_selector(".flit-item3 .flit-item-txt")
+        stops = re.sub(r"\s+", " ", stops_el.inner_text()).strip() if stops_el else None
+
+        bag_el = box.query_selector(".flit-item3 span")
         baggage = None
         if bag_el:
-            raw = bag_el.inner_text().strip()
-            # collapse the odd internal whitespace/newlines AirIQ's markup has
-            # around the baggage icon+text (e.g. "5 KG ,   20 KG")
-            baggage = re.sub(r"\s+", " ", raw).strip() or None
+            raw = re.sub(r"\s+", " ", bag_el.inner_text()).strip()
+            if re.search(r"\d+\s*KG", raw, re.IGNORECASE):
+                baggage = raw
 
         # Flight duration isn't in a normal visible field - it's only present
         # inside the "Copy Flight Details" button's onclick text
@@ -234,6 +243,7 @@ def _extract_flights(page):
             "flight_no": flight_no,
             "time": time_txt,
             "duration": duration,
+            "stops": stops,
             "baggage": baggage,
             "fare_inr": float(fare) if fare else None,
         })

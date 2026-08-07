@@ -73,6 +73,7 @@ def _flight_summary(fares):
                 "flight_no": c.get("flight_no", "").strip() if c.get("flight_no") else None,
                 "time": c.get("time"),
                 "duration": c.get("duration"),
+                "stops": c.get("stops"),
                 "baggage": c.get("baggage"),
             }
     return None
@@ -147,18 +148,25 @@ def build_html(origin, dest, year, month, fares, markup=0, theme="sunset",
 
     flight = _flight_summary(fares)
     if flight:
-        parts = []
+        is_direct = bool(flight["stops"]) and "non" in flight["stops"].lower() and "stop" in flight["stops"].lower()
+
+        items = []
+        if flight["stops"]:
+            if is_direct:
+                items.append('<span class="stops-badge direct">Direct Flight</span>')
+            else:
+                items.append(f'<span class="stops-badge">{flight["stops"]}</span>')
         if flight["flight_no"]:
-            parts.append(f'Flight <b>{flight["flight_no"]}</b>')
+            items.append(f'<span>Flight <b>{flight["flight_no"]}</b></span>')
         if flight["time"]:
             dep_arr = flight["time"].split(" - ")
             if len(dep_arr) == 2:
-                parts.append(f'Dep <b>{dep_arr[0]}</b> &rarr; Arr <b>{dep_arr[1]}</b>')
+                items.append(f'<span>Dep <b>{dep_arr[0]}</b> &rarr; Arr <b>{dep_arr[1]}</b></span>')
         if flight["duration"]:
-            parts.append(f'Duration <b>{flight["duration"]}</b>')
+            items.append(f'<span>Duration <b>{flight["duration"]}</b></span>')
         if flight["baggage"]:
-            parts.append(f'Baggage <b>{flight["baggage"]}</b>')
-        flight_strip = '<span class="sep">&bull;</span>'.join(f'<span>{p}</span>' for p in parts)
+            items.append(f'<span>Baggage <b>{flight["baggage"]}</b></span>')
+        flight_strip = '<span class="sep">&bull;</span>'.join(items)
         airline_tag = flight["airline"] or ""
     else:
         flight_strip = "<span>No live flight data for this route/month</span>"
@@ -187,7 +195,12 @@ def build_html(origin, dest, year, month, fares, markup=0, theme="sunset",
   .route .arrow {{ color: {t["accent"]}; margin: 0 10px; }}
   .subtitle {{ font-size: 18px; color: {t["secondary"]}; margin-top: 6px; font-weight: 500; }}
   .month-label {{ font-size: 22px; font-weight: 700; color: {t["accent"]}; text-align: right; }}
-  .airline-tag {{ font-size: 15px; color: {t["muted"]}; text-align: right; margin-top: 4px; }}
+  .airline-tag {{ font-size: 16px; font-weight: 800; color: {t["accent"]}; text-align: right; margin-top: 4px; }}
+  .stops-badge {{
+    font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px;
+    background: {t["muted"]}; color: {t["surface"]};
+  }}
+  .stops-badge.direct {{ background: {t["badge_bg"]}; color: {t["badge_text"]}; }}
   .flight-strip {{ display: flex; align-items: center; gap: 28px; background: {t["strip_bg"]}; border-radius: 10px; padding: 14px 22px; margin-bottom: 24px; font-size: 14px; color: {t["secondary"]}; }}
   .flight-strip b {{ color: {t["primary"]}; }}
   .flight-strip .sep {{ color: {t["muted"]}; margin: 0 8px; }}
