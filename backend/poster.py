@@ -72,6 +72,7 @@ def _flight_summary(fares):
                 "airline": c.get("airline", "").strip(),
                 "flight_no": c.get("flight_no", "").strip() if c.get("flight_no") else None,
                 "time": c.get("time"),
+                "duration": c.get("duration"),
                 "baggage": c.get("baggage"),
             }
     return None
@@ -153,6 +154,8 @@ def build_html(origin, dest, year, month, fares, markup=0, theme="sunset",
             dep_arr = flight["time"].split(" - ")
             if len(dep_arr) == 2:
                 parts.append(f'Dep <b>{dep_arr[0]}</b> &rarr; Arr <b>{dep_arr[1]}</b>')
+        if flight["duration"]:
+            parts.append(f'Duration <b>{flight["duration"]}</b>')
         if flight["baggage"]:
             parts.append(f'Baggage <b>{flight["baggage"]}</b>')
         flight_strip = '<span class="sep">&bull;</span>'.join(f'<span>{p}</span>' for p in parts)

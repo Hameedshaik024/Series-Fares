@@ -8,6 +8,7 @@ Only reads the default "AIR IQ" tab of search results (never clicks the
 "MARKET PLACE" tab) per the product requirement to ignore market fares.
 """
 import os
+import re
 import time
 import calendar
 import threading
@@ -22,6 +23,7 @@ SEARCH_URL = "https://airiq.in/Admin/Search.aspx"
 HOME_URL = "https://airiq.in/"
 
 _origins_cache = None
+_destinations_cache = {}  # origin code -> list of {code, label}
 _lock = threading.Lock()
 
 # in-memory state for the two-step (start/verify) login flow
@@ -123,7 +125,12 @@ def list_origins(force_refresh=False):
     with sync_playwright() as p:
         browser, ctx = _new_context(p)
         page = ctx.new_page()
-        page.goto(SEARCH_URL, wait_until="networkidle")
+        # "load" not "networkidle": the page keeps background analytics
+        # requests going, which can make networkidle hang 10+ seconds for
+        # no benefit here (we only need the <select> options, already
+        # present at load).
+        page.goto(SEARCH_URL, wait_until="load")
+        page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
         opts = page.query_selector_all("#dest_cmd option")
         origins = []
         for o in opts:
@@ -137,13 +144,18 @@ def list_origins(force_refresh=False):
     return _origins_cache
 
 
-def list_destinations(origin):
+def list_destinations(origin, force_refresh=False):
+    if origin in _destinations_cache and not force_refresh:
+        return _destinations_cache[origin]
+
     with sync_playwright() as p:
         browser, ctx = _new_context(p)
         page = ctx.new_page()
-        page.goto(SEARCH_URL, wait_until="networkidle")
-        with page.expect_navigation(wait_until="networkidle", timeout=30000):
+        page.goto(SEARCH_URL, wait_until="load")
+        page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
+        with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#dest_cmd", origin)
+        page.wait_for_selector("#to_cmd option", state="attached", timeout=15000)
         opts = page.query_selector_all("#to_cmd option")
         dests = []
         for o in opts:
@@ -153,7 +165,9 @@ def list_destinations(origin):
                 dests.append({"code": val, "label": label})
         browser.close()
 
-    return sorted(dests, key=lambda x: x["code"])
+    dests = sorted(dests, key=lambda x: x["code"])
+    _destinations_cache[origin] = dests
+    return dests
 
 
 # ---------- Fare scraping ----------
@@ -193,14 +207,33 @@ def _extract_flights(page):
         flight_no = flightno_el.inner_text().strip() if flightno_el else None
         time_el = box.query_selector(".flit-item6")
         time_txt = time_el.inner_text().strip().replace("\n", " - ") if time_el else None
-        bag_el = box.query_selector(".flit-item3 span")
-        baggage = bag_el.inner_text().strip() if bag_el else None
+
+        bag_el = box.query_selector(".flit-item3 span") or box.query_selector(".flit-item3")
+        baggage = None
+        if bag_el:
+            raw = bag_el.inner_text().strip()
+            # collapse the odd internal whitespace/newlines AirIQ's markup has
+            # around the baggage icon+text (e.g. "5 KG ,   20 KG")
+            baggage = re.sub(r"\s+", " ", raw).strip() or None
+
+        # Flight duration isn't in a normal visible field - it's only present
+        # inside the "Copy Flight Details" button's onclick text
+        # (e.g. "...*Flight Duration* : 2hr 5min\n..."). Pull it via regex.
+        duration = None
+        copy_el = box.query_selector(".copybtn a")
+        if copy_el:
+            onclick = copy_el.get_attribute("onclick") or ""
+            m = re.search(r"Flight Duration\*?\s*:\s*([^\\\n]+)", onclick)
+            if m:
+                duration = m.group(1).strip()
+
         rate_el = box.query_selector(".rate")
         fare = rate_el.get_attribute("data-inr") if rate_el else None
         flights.append({
             "airline": airline,
             "flight_no": flight_no,
             "time": time_txt,
+            "duration": duration,
             "baggage": baggage,
             "fare_inr": float(fare) if fare else None,
         })
