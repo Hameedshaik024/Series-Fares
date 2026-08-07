@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sea Sky Destinations — Fare Poster Generator</title>
+<style>
+  :root {
+    --bg: #fdf3ea; --surface: #fffaf3; --ink: #2b1c12; --ink-secondary: #7a6455;
+    --accent: #d85f31; --border: #eddcc8; --danger: #c0392b; --good: #2e8b57;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--ink-secondary); font-size: 14px; margin-bottom: 28px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; margin-bottom: 20px; }
+  label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; color: var(--ink-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+  select, input[type=number], input[type=password], input[type=text] {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: #fff; font-size: 15px; margin-bottom: 16px; color: var(--ink);
+  }
+  .row { display: flex; gap: 14px; }
+  .row > div { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 12px 20px; font-size: 15px; font-weight: 700; cursor: pointer; width: 100%;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  #status { font-size: 14px; margin-top: 14px; min-height: 20px; }
+  #status.err { color: var(--danger); }
+  #status.ok { color: var(--good); }
+  #result { margin-top: 20px; text-align: center; }
+  #result img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
+  #result a { display: inline-block; margin-top: 12px; font-weight: 700; color: var(--accent); text-decoration: none; }
+  #gate, #app { display: none; }
+  .hidden { display: none !important; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -3px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sea Sky Destinations</h1>
+  <div class="sub">Monthly fare poster generator (AirIQ live fares)</div>
+
+  <div id="gate" class="card">
+    <label for="pw">Access password</label>
+    <input type="password" id="pw" placeholder="Enter app password">
+    <button id="gateBtn">Enter</button>
+    <div id="gateStatus" style="margin-top:10px;font-size:13px;"></div>
+  </div>
+
+  <div id="app">
+    <div class="card" id="reloginCard" style="display:none;">
+      <div style="margin-bottom:12px;font-weight:700;">AirIQ session expired</div>
+      <div id="reloginStep1">
+        <button id="sendOtpBtn">Send OTP to my phone/email</button>
+      </div>
+      <div id="reloginStep2" style="display:none;">
+        <label for="otpInput">Enter the OTP</label>
+        <input type="text" id="otpInput" maxlength="6" placeholder="6-digit code">
+        <button id="verifyOtpBtn">Verify &amp; Continue</button>
+      </div>
+      <div id="reloginStatus" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label for="origin">Origin</label>
+          <select id="origin"><option>Loading…</option></select>
+        </div>
+        <div>
+          <label for="dest">Destination</label>
+          <select id="dest"><option>Select origin first</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="month">Month</label>
+          <select id="month"></select>
+        </div>
+        <div>
+          <label for="theme">Theme</label>
+          <select id="theme">
+            <option value="sunset" selected>Sunset (coral)</option>
+            <option value="sky">Sky (blue)</option>
+            <option value="ocean">Ocean (dark navy)</option>
+          </select>
+        </div>
+      </div>
+      <label for="markup">Increase fare by (₹, flat, optional)</label>
+      <input type="number" id="markup" placeholder="0" min="0" step="50">
+
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:normal;font-weight:600;color:var(--ink);margin-bottom:20px;">
+        <input type="checkbox" id="showLogo" checked style="width:auto;margin:0;">
+        Include Sea Sky logo on poster
+      </label>
+
+      <button id="generateBtn">Generate Poster</button>
+      <div id="status"></div>
+      <div id="result"></div>
+    </div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
