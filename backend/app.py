@@ -10,8 +10,13 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 AIRIQ_USER = os.environ.get("AIRIQ_USER", "")
 AIRIQ_PASS = os.environ.get("AIRIQ_PASS", "")
 
-app = Flask(__name__)
-CORS(app)  # frontend is on a different origin (Netlify); auth is via bearer token below
+app = Flask(__name__, static_folder="static", static_url_path="")
+CORS(app)  # harmless no-op now that frontend is same-origin; kept in case of a split deploy later
+
+
+@app.route("/")
+def index():
+    return app.send_static_file("index.html")
 
 
 def require_auth(fn):
