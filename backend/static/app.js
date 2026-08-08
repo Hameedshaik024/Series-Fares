@@ -225,3 +225,128 @@ function setStatus(html, cls) {
   el.innerHTML = html;
   el.className = cls || "";
 }
+
+// ---------- WhatsApp: link (QR) ----------
+
+let waPolling = false;
+
+$("linkWaBtn").addEventListener("click", async () => {
+  if (waPolling) return;
+  waPolling = true;
+  $("linkWaBtn").disabled = true;
+  $("waLinkStatus").textContent = "Loading QR…";
+
+  for (let i = 0; i < 60; i++) { // ~3 min of polling
+    let res;
+    try {
+      res = await api("/api/whatsapp/qr");
+    } catch (e) {
+      $("waLinkStatus").textContent = "Error: " + e.message;
+      break;
+    }
+
+    if (res.status === 502) {
+      $("waLinkStatus").textContent = "WhatsApp service isn't reachable yet — try again in a few seconds.";
+      break;
+    }
+
+    const contentType = res.headers.get("Content-Type") || "";
+    if (contentType.startsWith("image/")) {
+      const blob = await res.blob();
+      $("waQrImg").src = URL.createObjectURL(blob);
+      $("waQrWrap").style.display = "block";
+      $("waLinkStatus").textContent = "Scan the QR above.";
+    } else {
+      const data = await res.json();
+      if (data.linked) {
+        $("waQrWrap").style.display = "none";
+        $("waLinkStatus").textContent = "✅ WhatsApp linked.";
+        break;
+      }
+      // qr_ready: false - still starting up, keep polling
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
+  waPolling = false;
+  $("linkWaBtn").disabled = false;
+});
+
+// ---------- WhatsApp: list groups ----------
+
+$("showGroupsBtn").addEventListener("click", async () => {
+  $("waGroups").textContent = "Loading…";
+  const res = await api("/api/whatsapp/groups");
+  const data = await res.json();
+  if (!res.ok) {
+    $("waGroups").textContent = "Failed: " + (data.detail || data.error);
+    return;
+  }
+  if (!data.length) {
+    $("waGroups").textContent = "No groups found — make sure WhatsApp is linked and the account has joined a group.";
+    return;
+  }
+  $("waGroups").innerHTML = data
+    .map((g) => `<div style="padding:6px 0;border-bottom:1px solid var(--border);"><b>${g.name}</b><br><span style="color:var(--ink-secondary);user-select:all;">${g.id}</span></div>`)
+    .join("");
+});
+
+// ---------- WhatsApp: one-click send ----------
+
+$("sendWaBtn").addEventListener("click", async () => {
+  $("sendWaBtn").disabled = true;
+  const set = (html, cls) => {
+    const el = $("waSendStatus");
+    el.innerHTML = html;
+    el.className = cls || "";
+  };
+  set('<span class="spinner"></span> Starting…', "");
+
+  try {
+    const res = await api("/api/whatsapp/send-monthly", { method: "POST" });
+    const startData = await res.json().catch(() => ({}));
+
+    if (res.status === 401) {
+      if (startData.error === "not_logged_in") {
+        set("AirIQ session expired.", "err");
+        showRelogin();
+      } else {
+        set("Wrong app password — reload and re-enter it.", "err");
+      }
+      return;
+    }
+    if (!res.ok) {
+      set("Failed: " + (startData.detail || startData.error || res.statusText), "err");
+      return;
+    }
+
+    const jobId = startData.job_id;
+    while (true) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const sres = await api(`/api/generate/status/${jobId}`);
+      const data = await sres.json();
+
+      if (data.status === "running") {
+        const p = data.progress;
+        const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ…";
+        set(`<span class="spinner"></span> ${progressText} — this takes 1-3 minutes…`, "");
+        continue;
+      }
+      if (data.status === "error") {
+        if (data.error === "not_logged_in") {
+          set("AirIQ session expired.", "err");
+          showRelogin();
+        } else {
+          set("Failed: " + data.error, "err");
+        }
+        break;
+      }
+      set("✅ Sent to WhatsApp group.", "ok");
+      break;
+    }
+  } catch (e) {
+    set("Error: " + e.message, "err");
+  } finally {
+    $("sendWaBtn").disabled = false;
+  }
+});

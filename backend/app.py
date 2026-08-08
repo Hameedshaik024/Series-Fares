@@ -1,8 +1,10 @@
 import os
 import time
 import uuid
+import datetime
 import functools
 import threading
+import requests
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 
@@ -12,6 +14,11 @@ import poster
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 AIRIQ_USER = os.environ.get("AIRIQ_USER", "")
 AIRIQ_PASS = os.environ.get("AIRIQ_PASS", "")
+
+WHATSAPP_SIDECAR_URL = os.environ.get("WHATSAPP_SIDECAR_URL", "http://127.0.0.1:3000")
+WHATSAPP_SHARED_SECRET = os.environ.get("WHATSAPP_SHARED_SECRET", "")
+WHATSAPP_GROUP_ID = os.environ.get("WHATSAPP_GROUP_ID", "")
+WHATSAPP_CAPTION = "\U0001F4DE Contact Details : 9951661243"  # "📞 Contact Details : 9951661243"
 
 # In-memory job store for /api/generate. A "Generate" call scrapes a whole
 # month day-by-day (AirIQ has no bulk endpoint), which reliably takes
@@ -50,6 +57,39 @@ def _run_generate_job(job_id, origin, dest, year, month, markup, theme, show_log
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"] = str(e)
+
+
+def _run_whatsapp_job(job_id, origin, dest, year, month, markup, theme):
+    def progress_cb(day, total, status):
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = {"day": day, "total": total, "last_status": status}
+
+    try:
+        fares = airiq_client.scrape_month(origin, dest, year, month, progress_cb=progress_cb)
+        png_bytes = poster.build(origin, dest, year, month, fares, markup, theme, show_logo=True)
+
+        resp = requests.post(
+            f"{WHATSAPP_SIDECAR_URL}/send",
+            headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
+            data={"groupId": WHATSAPP_GROUP_ID, "caption": WHATSAPP_CAPTION},
+            files={"image": ("poster.png", png_bytes, "image/png")},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"whatsapp_send_failed: {resp.status_code} {resp.text}")
+
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = {"sent": True}
+    except RuntimeError as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = "not_logged_in" if str(e) == "not_logged_in" else str(e)
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)  # harmless no-op now that frontend is same-origin; kept in case of a split deploy later
@@ -148,7 +188,7 @@ def generate():
 
     job_id = uuid.uuid4().hex
     with _jobs_lock:
-        _jobs[job_id] = {"status": "running", "progress": None, "result": None, "error": None, "created": time.time()}
+        _jobs[job_id] = {"status": "running", "progress": None, "result": None, "error": None, "created": time.time(), "kind": "poster"}
 
     thread = threading.Thread(
         target=_run_generate_job,
@@ -167,7 +207,10 @@ def generate_status(job_id):
         job = _jobs.get(job_id)
         if not job:
             return jsonify({"error": "unknown_job"}), 404
-        return jsonify({"status": job["status"], "progress": job["progress"], "error": job["error"]})
+        payload = {"status": job["status"], "progress": job["progress"], "error": job["error"]}
+        if job.get("kind") == "whatsapp":
+            payload["result"] = job["result"]
+        return jsonify(payload)
 
 
 @app.route("/api/generate/result/<job_id>")
@@ -181,6 +224,63 @@ def generate_result(job_id):
             return jsonify({"error": "not_ready", "status": job["status"]}), 409
         png_bytes = job["result"]
     return Response(png_bytes, mimetype="image/png")
+
+
+@app.route("/api/whatsapp/qr")
+@require_auth
+def whatsapp_qr():
+    try:
+        resp = requests.get(
+            f"{WHATSAPP_SIDECAR_URL}/qr",
+            headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
+            timeout=10,
+        )
+    except Exception as e:
+        return jsonify({"error": "sidecar_unreachable", "detail": str(e)}), 502
+    if resp.headers.get("Content-Type", "").startswith("image/"):
+        return Response(resp.content, mimetype="image/png")
+    return Response(resp.content, status=resp.status_code, mimetype="application/json")
+
+
+@app.route("/api/whatsapp/groups")
+@require_auth
+def whatsapp_groups():
+    try:
+        resp = requests.get(
+            f"{WHATSAPP_SIDECAR_URL}/groups",
+            headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
+            timeout=15,
+        )
+    except Exception as e:
+        return jsonify({"error": "sidecar_unreachable", "detail": str(e)}), 502
+    return Response(resp.content, status=resp.status_code, mimetype="application/json")
+
+
+@app.route("/api/whatsapp/send-monthly", methods=["POST"])
+@require_auth
+def whatsapp_send_monthly():
+    _prune_old_jobs()
+    if not airiq_client.has_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    if not WHATSAPP_GROUP_ID:
+        return jsonify({"error": "server_misconfigured", "detail": "WHATSAPP_GROUP_ID not set"}), 500
+
+    now = datetime.datetime.now()
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "running", "progress": None, "result": None, "error": None,
+            "created": time.time(), "kind": "whatsapp",
+        }
+
+    thread = threading.Thread(
+        target=_run_whatsapp_job,
+        args=(job_id, "HYD", "DXB", now.year, now.month, 500.0, "sunset"),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id}), 202
 
 
 if __name__ == "__main__":

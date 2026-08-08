@@ -104,6 +104,28 @@
       <div id="status"></div>
       <div id="result"></div>
     </div>
+
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:4px;">WhatsApp auto-post</div>
+      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">One-time setup: link WhatsApp, then find your group's ID.</div>
+
+      <button class="secondary" id="linkWaBtn" style="margin-bottom:10px;">Link WhatsApp</button>
+      <div id="waQrWrap" style="display:none;text-align:center;margin-bottom:14px;">
+        <img id="waQrImg" style="max-width:220px;border-radius:8px;border:1px solid var(--border);">
+        <div style="font-size:12px;color:var(--ink-secondary);margin-top:6px;">Scan with WhatsApp &rarr; Linked Devices &rarr; Link a Device</div>
+      </div>
+      <div id="waLinkStatus" style="font-size:13px;margin-bottom:14px;"></div>
+
+      <button class="secondary" id="showGroupsBtn" style="margin-bottom:10px;">Show my groups</button>
+      <div id="waGroups" style="font-size:13px;margin-bottom:6px;"></div>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:700;margin-bottom:4px;">📤 One-click send</div>
+      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">HYD &rarr; DXB &middot; current month &middot; +&#8377;500 &middot; posts straight into your WhatsApp group.</div>
+      <button id="sendWaBtn">Send HYD → DXB to WhatsApp</button>
+      <div id="waSendStatus" style="font-size:14px;margin-top:14px;min-height:20px;"></div>
+    </div>
   </div>
 </div>
 

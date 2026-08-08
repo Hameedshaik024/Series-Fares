@@ -2,3 +2,5 @@ state/
 .env
 __pycache__/
 *.pyc
+whatsapp/node_modules/
+whatsapp/state/
