@@ -263,8 +263,15 @@ def _extract_flights(page):
     return flights
 
 
-def _ensure_tab(page, link_id):
-    """Click #AirIQ_Lnk or #MarketPlace_Lnk only if it isn't already the active tab."""
+def _ensure_tab(page, link_id, timeout=25000):
+    """Click #AirIQ_Lnk or #MarketPlace_Lnk only if it isn't already the
+    active tab. Confirmed live (Render logs): checking the tab link's
+    className immediately, with no wait, fails outright when the page
+    hasn't finished rendering it yet - this was only guarded before the
+    *first* call to this function, not the second (Market Place), which is
+    exactly the gap that dropped 26 Aug. Wait for the link to exist first,
+    on every call."""
+    page.wait_for_selector(f"#{link_id}", state="attached", timeout=timeout)
     cls = page.eval_on_selector(f"#{link_id}", "el => el.className")
     if "actv" in cls:
         return
@@ -303,20 +310,27 @@ def _fetch_day(page, d, max_attempts=2):
             _pick_day(page, d.year, d.month, d.day)
             with page.expect_navigation(wait_until="load", timeout=30000):
                 page.click("#SearchBtn")
-            page.wait_for_selector("#AirIQ_Lnk", state="attached", timeout=15000)
             _ensure_tab(page, "AirIQ_Lnk")
             _wait_for_results(page)
             airiq_flights = _extract_flights(page)
+            if airiq_flights:
+                # pricing.pick_fare always prefers AIR IQ over Market Place
+                # when AIR IQ has any fare - so Market Place's data would
+                # never actually get used for this date. Skip loading it:
+                # it's the single biggest chunk of scrape time (a whole
+                # extra tab switch + render wait per date) and an extra
+                # chance to hit the slow-render race, for nothing.
+                return airiq_flights, [], None
             _ensure_tab(page, "MarketPlace_Lnk")
             _wait_for_results(page)
             marketplace_flights = _extract_flights(page)
-            if airiq_flights or marketplace_flights:
+            if marketplace_flights:
                 return airiq_flights, marketplace_flights, None
             last_error = None
         except Exception as e:
             last_error = str(e)
         if attempt < max_attempts - 1:
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(3000)
     return [], [], last_error
 
 
