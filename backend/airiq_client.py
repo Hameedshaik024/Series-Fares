@@ -197,11 +197,7 @@ def _navigate_datepicker_to_month(page, target_year, target_month):
 
 def _pick_day(page, year, month, day):
     _navigate_datepicker_to_month(page, year, month)
-    # 3000ms was too tight under Render's shared free-tier CPU, especially
-    # deep into a long scrape session - confirmed live via logged timeouts
-    # on otherwise-bookable dates (e.g. today/tomorrow, and dates near the
-    # end of a 30-day range after many prior page loads).
-    page.click(f"#ui-datepicker-div a.ui-state-default >> text='{day}'", timeout=10000)
+    page.click(f"#ui-datepicker-div a.ui-state-default >> text='{day}'", timeout=3000)
 
 
 def _extract_flights(page):
@@ -263,75 +259,13 @@ def _extract_flights(page):
     return flights
 
 
-def _ensure_tab(page, link_id, timeout=25000):
-    """Click #AirIQ_Lnk or #MarketPlace_Lnk only if it isn't already the
-    active tab. Confirmed live (Render logs): checking the tab link's
-    className immediately, with no wait, fails outright when the page
-    hasn't finished rendering it yet - this was only guarded before the
-    *first* call to this function, not the second (Market Place), which is
-    exactly the gap that dropped 26 Aug. Wait for the link to exist first,
-    on every call."""
-    page.wait_for_selector(f"#{link_id}", state="attached", timeout=timeout)
+def _ensure_tab(page, link_id):
+    """Click #AirIQ_Lnk or #MarketPlace_Lnk only if it isn't already the active tab."""
     cls = page.eval_on_selector(f"#{link_id}", "el => el.className")
     if "actv" in cls:
         return
     with page.expect_navigation(wait_until="load", timeout=30000):
         page.click(f"#{link_id}")
-
-
-def _wait_for_results(page, timeout=12000):
-    """After landing on a tab (initial search, or a tab switch), the flight
-    cards (.flit-box) render asynchronously - "load" firing, or the tab
-    link existing, doesn't mean they're there yet. Confirmed live: dates
-    with more results (real fares) take longer to render than empty ones,
-    so extracting right away raced ahead of the page on exactly the dates
-    that had fares, and the failure moved to whichever tab hit the race
-    for a given date. A date can also genuinely have zero flights, which
-    Playwright can't tell apart from "still loading" - so a timeout here
-    is treated as "no results", not an error; _extract_flights will
-    correctly return an empty list either way."""
-    try:
-        page.wait_for_selector(".flit-box", state="attached", timeout=timeout)
-    except Exception:
-        pass
-
-
-def _fetch_day(page, d, max_attempts=2):
-    """Search fares for one date, retrying once (by default) if the first
-    attempt comes back completely empty on both tabs, or errors outright.
-    Confirmed against the live site that a date can genuinely have fares
-    while the first search attempt still returns nothing - a transient
-    hiccup on AirIQ's side, not real sold-out inventory - so treating an
-    empty first result as final was silently dropping bookable dates.
-    Returns (airiq_flights, marketplace_flights, error_or_None)."""
-    last_error = None
-    for attempt in range(max_attempts):
-        try:
-            _pick_day(page, d.year, d.month, d.day)
-            with page.expect_navigation(wait_until="load", timeout=30000):
-                page.click("#SearchBtn")
-            _ensure_tab(page, "AirIQ_Lnk")
-            _wait_for_results(page)
-            airiq_flights = _extract_flights(page)
-            if airiq_flights:
-                # pricing.pick_fare always prefers AIR IQ over Market Place
-                # when AIR IQ has any fare - so Market Place's data would
-                # never actually get used for this date. Skip loading it:
-                # it's the single biggest chunk of scrape time (a whole
-                # extra tab switch + render wait per date) and an extra
-                # chance to hit the slow-render race, for nothing.
-                return airiq_flights, [], None
-            _ensure_tab(page, "MarketPlace_Lnk")
-            _wait_for_results(page)
-            marketplace_flights = _extract_flights(page)
-            if marketplace_flights:
-                return airiq_flights, marketplace_flights, None
-            last_error = None
-        except Exception as e:
-            last_error = str(e)
-        if attempt < max_attempts - 1:
-            page.wait_for_timeout(3000)
-    return [], [], last_error
 
 
 def scrape_range(origin, dest, dates, progress_cb=None):
@@ -361,46 +295,50 @@ def scrape_range(origin, dest, dates, progress_cb=None):
         with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#to_cmd", dest)
 
-        # A date that's failed twice in a row despite genuinely having
-        # bookable fares (confirmed live for HYD-MCT 11/12 Aug) means
-        # something other than plain network flakiness is going on - log
-        # what the page actually looked like so the real cause shows up in
-        # Render's logs instead of us guessing blind again. JS dialogs
-        # (e.g. an advance-booking-window warning) are also a suspect:
-        # left unhandled they can stall a click/navigation until timeout.
-        current_date_ctx = {"date": None}
-
-        def _on_dialog(dialog):
-            print(f"[airiq_client] JS dialog while on {current_date_ctx['date']}: "
-                  f"{dialog.type} - {dialog.message!r}", flush=True)
-            dialog.dismiss()
-
-        page.on("dialog", _on_dialog)
-
         for idx, d in enumerate(dates, start=1):
             key = d.isoformat()
-            current_date_ctx["date"] = f"{origin}-{dest} {key}"
-            airiq_flights, marketplace_flights, error = _fetch_day(page, d)
-            results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
-            if error:
-                results[key]["error"] = error
+            try:
+                _pick_day(page, d.year, d.month, d.day)
+            except Exception:
+                results[key] = {"airiq": [], "marketplace": []}
+                if progress_cb:
+                    progress_cb(idx, total, "unavailable")
+                continue
 
-            if not airiq_flights and not marketplace_flights:
+            try:
+                with page.expect_navigation(wait_until="load", timeout=30000):
+                    page.click("#SearchBtn")
+            except Exception as e:
+                results[key] = {"airiq": [], "marketplace": [], "error": str(e)}
+                if progress_cb:
+                    progress_cb(idx, total, "error")
+                continue
+
+            try:
+                _ensure_tab(page, "AirIQ_Lnk")
+                airiq_flights = _extract_flights(page)
+            except Exception:
+                airiq_flights = []
+
+            if airiq_flights:
+                # pricing.pick_fare always prefers AIR IQ over Market Place
+                # whenever AIR IQ has any fare, so Market Place's data would
+                # never actually get used for this date - skip loading it.
+                # Pure time saved, no behavior change (confirmed against
+                # pricing.py's rule), unlike the various wait/retry attempts
+                # that turned out to make things slower without actually
+                # fixing anything.
+                marketplace_flights = []
+            else:
                 try:
-                    title = page.title()
-                    body_snippet = page.inner_text("body")[:300].replace("\n", " ")
-                except Exception as e:
-                    title, body_snippet = "?", f"(couldn't read page: {e})"
-                print(f"[airiq_client] {origin}-{dest} {key}: no fare after retries "
-                      f"(error={error!r}, page_title={title!r}, body_start={body_snippet!r})", flush=True)
+                    _ensure_tab(page, "MarketPlace_Lnk")
+                    marketplace_flights = _extract_flights(page)
+                except Exception:
+                    marketplace_flights = []
 
+            results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
             if progress_cb:
-                if error:
-                    status = "error"
-                elif airiq_flights or marketplace_flights:
-                    status = "ok"
-                else:
-                    status = "sold_out"
+                status = "ok" if (airiq_flights or marketplace_flights) else "sold_out"
                 progress_cb(idx, total, status)
 
         browser.close()
