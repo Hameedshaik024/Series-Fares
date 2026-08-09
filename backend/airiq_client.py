@@ -341,15 +341,17 @@ def scrape_range(origin, dest, dates, progress_cb=None):
             key = d.isoformat()
             airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
 
-            if status == "sold_out":
-                # Confirmed live: the exact same date, same code, flips
-                # between having and not having fares across separate runs
-                # - genuine transient flakiness on AirIQ's side, not a
-                # deterministic failure. One quick extra look (same fast
-                # timeouts, no long wait) gives it a second chance without
-                # the multi-minute slowdown the longer-wait approach cost.
+            # Confirmed live: the exact same date, same code, flips between
+            # having and not having fares across separate runs - genuine
+            # transient flakiness on AirIQ's side, not a deterministic
+            # failure. A couple of quick extra looks (same fast timeouts,
+            # no long wait) improve the odds without the multi-minute
+            # slowdown the longer-wait approach cost.
+            retries = 0
+            while status == "sold_out" and retries < 2:
                 page.wait_for_timeout(500)
                 airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+                retries += 1
 
             results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
             if progress_cb:
