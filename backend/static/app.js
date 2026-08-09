@@ -313,20 +313,30 @@ $("sendWaBtn").addEventListener("click", async () => {
 
       if (data.status === "running") {
         const p = data.progress;
-        const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ + Market Place…";
-        set(`<span class="spinner"></span> ${progressText} — this takes a few minutes…`, "");
+        const progressText = p
+          ? `Route ${p.route_num}/${p.route_total} (${p.route}) — day ${p.day}/${p.total} (${p.last_status})`
+          : "Starting…";
+        set(`<span class="spinner"></span> ${progressText} — this takes a while, please wait…`, "");
         continue;
       }
       if (data.status === "error") {
         if (data.error === "not_logged_in") {
-          set("AirIQ session expired.", "err");
+          set("AirIQ session expired partway through — routes already sent are done, the rest were skipped.", "err");
           showRelogin();
         } else {
           set("Failed: " + data.error, "err");
         }
         break;
       }
-      set("✅ Sent to WhatsApp group.", "ok");
+
+      // done - data.result is {"HYD-DXB": {sent:true} | {error:...}, ...} per route
+      const lines = Object.entries(data.result || {}).map(([route, r]) => {
+        if (r.sent) return `✅ ${route}: sent`;
+        if (r.error === "group_not_set") return `⚪ ${route}: skipped (no group ID set)`;
+        return `❌ ${route}: ${r.error}`;
+      });
+      const anySent = Object.values(data.result || {}).some((r) => r.sent);
+      set(lines.join("<br>"), anySent ? "ok" : "err");
       break;
     }
   } catch (e) {

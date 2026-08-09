@@ -21,8 +21,10 @@ want to split it out to Netlify later — it's not used in this setup.)
      will ask for on the login screen
    - `WHATSAPP_SHARED_SECRET` — a long random string (internal only, see
      below)
-   - `WHATSAPP_GROUP_ID` — leave blank for now, you'll fill this in after
-     step 6
+   - `WHATSAPP_GROUP_ID_HYD_DXB`, `WHATSAPP_GROUP_ID_HYD_RUH`,
+     `WHATSAPP_GROUP_ID_HYD_MCT` — leave blank for now, you'll fill these
+     in after step 6 (one per route; any left blank are just skipped when
+     you click "Send")
 4. Deploy. Render gives you a public URL, e.g.
    `https://series-fares.onrender.com` — open it directly, that's the app.
 5. **First login**: the container starts with no saved AirIQ session. Enter
@@ -35,11 +37,15 @@ want to split it out to Netlify later — it's not used in this setup.)
      AirIQ's OTP login, not something the app can get around.
 6. **Link WhatsApp** (one-time, for the "Send to WhatsApp" button): in the
    app, click **Link WhatsApp** under "WhatsApp auto-post" and scan the QR
-   with the WhatsApp account that should post into your group (WhatsApp →
+   with the WhatsApp account that should post into your groups (WhatsApp →
    Linked Devices → Link a Device). Once linked, click **Show my groups**,
-   find your target group in the list, and copy its ID (looks like
-   `123456789-987654321@g.us`). Set that as `WHATSAPP_GROUP_ID` in Render's
-   environment variables and redeploy once more to pick it up.
+   find each of your three target groups (one for HYD-DXB, one for
+   HYD-RUH, one for HYD-MCT) in the list, and copy each ID (looks like
+   `123456789-987654321@g.us`). Set them as `WHATSAPP_GROUP_ID_HYD_DXB`,
+   `WHATSAPP_GROUP_ID_HYD_RUH`, `WHATSAPP_GROUP_ID_HYD_MCT` in Render's
+   environment variables and redeploy once more to pick them up. You don't
+   need all three set — any route left blank is just skipped when you
+   click send, the others still go out.
    - **Important caveats**: this uses an unofficial, reverse-engineered
      WhatsApp Web protocol (Baileys) — not Meta's official API — because
      the official API cannot post into arbitrary group chats at all. This
@@ -85,7 +91,11 @@ the WhatsApp panel will just show "service isn't reachable".)
   inside the same container, reachable only via `localhost` — it's never
   exposed publicly. Flask proxies the QR/groups endpoints and calls
   `/send` directly over loopback. See `backend/whatsapp/index.js`.
-- The "Send HYD → DXB to WhatsApp" button is hardcoded to that one route
-  and the next 30 days, per the original request — not a general-purpose
-  route picker. Its markup is the same automatic AirIQ+500/Market Place+0
-  rule above, no separate flat add-on.
+- The one-click send button is hardcoded to three routes (HYD-DXB,
+  HYD-RUH, HYD-MCT) and the next 30 days, per the original request — not a
+  general-purpose route picker. It builds a separate poster per route and
+  posts each into its own group (same caption on all three), using the
+  same automatic AirIQ+500/Market Place+0 rule above, no separate flat
+  add-on. If one route fails (no fares, AirIQ session dies, etc.) the
+  others still go out — the status message after sending shows a
+  per-route ✅/❌/⚪ result.

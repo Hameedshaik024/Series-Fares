@@ -18,8 +18,16 @@ AIRIQ_PASS = os.environ.get("AIRIQ_PASS", "")
 
 WHATSAPP_SIDECAR_URL = os.environ.get("WHATSAPP_SIDECAR_URL", "http://127.0.0.1:3000")
 WHATSAPP_SHARED_SECRET = os.environ.get("WHATSAPP_SHARED_SECRET", "")
-WHATSAPP_GROUP_ID = os.environ.get("WHATSAPP_GROUP_ID", "")
 WHATSAPP_CAPTION = "\U0001F4DE Contact Details : 9951661243"  # "📞 Contact Details : 9951661243"
+
+# One-click send now covers three fixed routes, each posted into its own
+# group with the same caption. WHATSAPP_GROUP_ID is kept as the HYD-DXB
+# group so existing deployments don't lose their setting when upgrading.
+WHATSAPP_ROUTES = [
+    ("HYD", "DXB", os.environ.get("WHATSAPP_GROUP_ID_HYD_DXB") or os.environ.get("WHATSAPP_GROUP_ID", "")),
+    ("HYD", "RUH", os.environ.get("WHATSAPP_GROUP_ID_HYD_RUH", "")),
+    ("HYD", "MCT", os.environ.get("WHATSAPP_GROUP_ID_HYD_MCT", "")),
+]
 
 # In-memory job store for /api/generate. A "Generate" call scrapes a whole
 # month day-by-day (AirIQ has no bulk endpoint), which reliably takes
@@ -82,40 +90,63 @@ def _run_generate_job(job_id, origin, dest, markup, theme, show_logo):
             _jobs[job_id]["error"] = str(e)
 
 
-def _run_whatsapp_job(job_id, origin, dest, theme):
-    def progress_cb(day, total, status):
-        with _jobs_lock:
-            _jobs[job_id]["progress"] = {"day": day, "total": total, "last_status": status}
+def _run_whatsapp_job(job_id, theme):
+    """Builds and sends a poster for each route in WHATSAPP_ROUTES, into its
+    own group, same caption. One route's failure (no fares, send error,
+    missing group id) doesn't stop the others - each is recorded
+    independently so a partial run still gets the working routes out."""
+    dates = _next_30_days()
+    total_routes = len(WHATSAPP_ROUTES)
+    results = {}
 
-    try:
-        dates = _next_30_days()
-        # manual_markup=0: the automatic AirIQ+500/MarketPlace+0 rule in
-        # pricing.pick_fare is what the WhatsApp button's markup now is -
-        # no separate flat add-on on top (see plan for why).
-        priced_days = _scrape_and_price(origin, dest, dates, 0, progress_cb)
-        png_bytes = poster.build(origin, dest, dates, priced_days, theme, show_logo=True)
+    def progress_cb(route_label, route_idx):
+        def _cb(day, total, status):
+            with _jobs_lock:
+                _jobs[job_id]["progress"] = {
+                    "route": route_label, "route_num": route_idx, "route_total": total_routes,
+                    "day": day, "total": total, "last_status": status,
+                }
+        return _cb
 
-        resp = requests.post(
-            f"{WHATSAPP_SIDECAR_URL}/send",
-            headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
-            data={"groupId": WHATSAPP_GROUP_ID, "caption": WHATSAPP_CAPTION},
-            files={"image": ("poster.png", png_bytes, "image/png")},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"whatsapp_send_failed: {resp.status_code} {resp.text}")
+    for idx, (origin, dest, group_id) in enumerate(WHATSAPP_ROUTES, start=1):
+        label = f"{origin}-{dest}"
+        if not group_id:
+            results[label] = {"error": "group_not_set"}
+            continue
+        try:
+            # manual_markup=0: the automatic AirIQ+500/MarketPlace+0 rule in
+            # pricing.pick_fare is what the WhatsApp button's markup now is -
+            # no separate flat add-on on top (see plan for why).
+            priced_days = _scrape_and_price(origin, dest, dates, 0, progress_cb(label, idx))
+            png_bytes = poster.build(origin, dest, dates, priced_days, theme, show_logo=True)
 
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["result"] = {"sent": True}
-    except RuntimeError as e:
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"] = "not_logged_in" if str(e) == "not_logged_in" else str(e)
-    except Exception as e:
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"] = str(e)
+            resp = requests.post(
+                f"{WHATSAPP_SIDECAR_URL}/send",
+                headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
+                data={"groupId": group_id, "caption": WHATSAPP_CAPTION},
+                files={"image": ("poster.png", png_bytes, "image/png")},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"whatsapp_send_failed: {resp.status_code} {resp.text}")
+
+            results[label] = {"sent": True}
+        except RuntimeError as e:
+            if str(e) == "not_logged_in":
+                # AirIQ session died mid-run - no point trying the remaining
+                # routes, they'll all fail the same way.
+                with _jobs_lock:
+                    _jobs[job_id]["status"] = "error"
+                    _jobs[job_id]["error"] = "not_logged_in"
+                    _jobs[job_id]["result"] = results
+                return
+            results[label] = {"error": str(e)}
+        except Exception as e:
+            results[label] = {"error": str(e)}
+
+    with _jobs_lock:
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = results
 
 
 app = Flask(__name__, static_folder="static", static_url_path="")
@@ -287,8 +318,12 @@ def whatsapp_send_monthly():
     _prune_old_jobs()
     if not airiq_client.has_session():
         return jsonify({"error": "not_logged_in"}), 401
-    if not WHATSAPP_GROUP_ID:
-        return jsonify({"error": "server_misconfigured", "detail": "WHATSAPP_GROUP_ID not set"}), 500
+    if not any(group_id for _, _, group_id in WHATSAPP_ROUTES):
+        return jsonify({
+            "error": "server_misconfigured",
+            "detail": "No WHATSAPP_GROUP_ID_* env vars are set (need at least one of "
+                       "WHATSAPP_GROUP_ID_HYD_DXB / _HYD_RUH / _HYD_MCT)",
+        }), 500
 
     job_id = uuid.uuid4().hex
     with _jobs_lock:
@@ -299,7 +334,7 @@ def whatsapp_send_monthly():
 
     thread = threading.Thread(
         target=_run_whatsapp_job,
-        args=(job_id, "HYD", "DXB", "sunset"),
+        args=(job_id, "sunset"),
         daemon=True,
     )
     thread.start()
