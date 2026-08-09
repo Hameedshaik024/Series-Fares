@@ -310,6 +310,21 @@ def _fetch_one_date(page, d):
     return airiq_flights, marketplace_flights, status
 
 
+def _reload_search_form(page, origin, dest):
+    """Fully reload the search page and reselect origin/dest, instead of
+    continuing to reuse the same long-lived page. Last-resort retry: if
+    AirIQ's ASP.NET postback/viewstate degrades after many searches in one
+    session, an in-place retry wouldn't catch that, but a fresh page load
+    would - a different failure mode than plain rendering slowness."""
+    page.goto(SEARCH_URL, wait_until="load")
+    page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
+    with page.expect_navigation(wait_until="load", timeout=30000):
+        page.select_option("#dest_cmd", origin)
+    page.wait_for_selector("#to_cmd option", state="attached", timeout=15000)
+    with page.expect_navigation(wait_until="load", timeout=30000):
+        page.select_option("#to_cmd", dest)
+
+
 def scrape_range(origin, dest, dates, progress_cb=None):
     """dates: list of datetime.date, in the order to scrape.
 
@@ -352,6 +367,13 @@ def scrape_range(origin, dest, dates, progress_cb=None):
                 page.wait_for_timeout(500)
                 airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
                 retries += 1
+
+            if status == "sold_out":
+                # Still nothing after two cheap in-place retries - try a
+                # different theory: a fully fresh page load rather than
+                # continuing in the same session.
+                _reload_search_form(page, origin, dest)
+                airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
 
             results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
             if progress_cb:
