@@ -268,6 +268,34 @@ def _ensure_tab(page, link_id):
         page.click(f"#{link_id}")
 
 
+def _fetch_day(page, d, max_attempts=2):
+    """Search fares for one date, retrying once (by default) if the first
+    attempt comes back completely empty on both tabs, or errors outright.
+    Confirmed against the live site that a date can genuinely have fares
+    while the first search attempt still returns nothing - a transient
+    hiccup on AirIQ's side, not real sold-out inventory - so treating an
+    empty first result as final was silently dropping bookable dates.
+    Returns (airiq_flights, marketplace_flights, error_or_None)."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            _pick_day(page, d.year, d.month, d.day)
+            with page.expect_navigation(wait_until="load", timeout=30000):
+                page.click("#SearchBtn")
+            _ensure_tab(page, "AirIQ_Lnk")
+            airiq_flights = _extract_flights(page)
+            _ensure_tab(page, "MarketPlace_Lnk")
+            marketplace_flights = _extract_flights(page)
+            if airiq_flights or marketplace_flights:
+                return airiq_flights, marketplace_flights, None
+            last_error = None
+        except Exception as e:
+            last_error = str(e)
+        if attempt < max_attempts - 1:
+            page.wait_for_timeout(1000)
+    return [], [], last_error
+
+
 def scrape_range(origin, dest, dates, progress_cb=None):
     """dates: list of datetime.date, in the order to scrape.
 
@@ -297,38 +325,18 @@ def scrape_range(origin, dest, dates, progress_cb=None):
 
         for idx, d in enumerate(dates, start=1):
             key = d.isoformat()
-            try:
-                _pick_day(page, d.year, d.month, d.day)
-            except Exception:
-                results[key] = {"airiq": [], "marketplace": []}
-                if progress_cb:
-                    progress_cb(idx, total, "unavailable")
-                continue
-
-            try:
-                with page.expect_navigation(wait_until="load", timeout=30000):
-                    page.click("#SearchBtn")
-            except Exception as e:
-                results[key] = {"airiq": [], "marketplace": [], "error": str(e)}
-                if progress_cb:
-                    progress_cb(idx, total, "error")
-                continue
-
-            try:
-                _ensure_tab(page, "AirIQ_Lnk")
-                airiq_flights = _extract_flights(page)
-            except Exception:
-                airiq_flights = []
-
-            try:
-                _ensure_tab(page, "MarketPlace_Lnk")
-                marketplace_flights = _extract_flights(page)
-            except Exception:
-                marketplace_flights = []
-
+            airiq_flights, marketplace_flights, error = _fetch_day(page, d)
             results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
+            if error:
+                results[key]["error"] = error
+
             if progress_cb:
-                status = "ok" if (airiq_flights or marketplace_flights) else "sold_out"
+                if error:
+                    status = "error"
+                elif airiq_flights or marketplace_flights:
+                    status = "ok"
+                else:
+                    status = "sold_out"
                 progress_cb(idx, total, status)
 
         browser.close()
