@@ -197,7 +197,11 @@ def _navigate_datepicker_to_month(page, target_year, target_month):
 
 def _pick_day(page, year, month, day):
     _navigate_datepicker_to_month(page, year, month)
-    page.click(f"#ui-datepicker-div a.ui-state-default >> text='{day}'", timeout=3000)
+    # 3000ms was too tight under Render's shared free-tier CPU, especially
+    # deep into a long scrape session - confirmed live via logged timeouts
+    # on otherwise-bookable dates (e.g. today/tomorrow, and dates near the
+    # end of a 30-day range after many prior page loads).
+    page.click(f"#ui-datepicker-div a.ui-state-default >> text='{day}'", timeout=10000)
 
 
 def _extract_flights(page):
@@ -282,6 +286,12 @@ def _fetch_day(page, d, max_attempts=2):
             _pick_day(page, d.year, d.month, d.day)
             with page.expect_navigation(wait_until="load", timeout=30000):
                 page.click("#SearchBtn")
+            # "load" firing doesn't mean the results tabs have rendered yet -
+            # dates with more flight options (real results) take longer to
+            # build than dates with none, so checking #AirIQ_Lnk right after
+            # "load" raced ahead of the page on exactly the dates that had
+            # fares. Wait for it to actually attach first.
+            page.wait_for_selector("#AirIQ_Lnk", state="attached", timeout=15000)
             _ensure_tab(page, "AirIQ_Lnk")
             airiq_flights = _extract_flights(page)
             _ensure_tab(page, "MarketPlace_Lnk")
