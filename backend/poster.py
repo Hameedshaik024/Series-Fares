@@ -12,6 +12,7 @@ strip; only dates flying something different get their own compact
 flight info inline in the cell.
 """
 import os
+import re
 import base64
 import datetime
 from collections import Counter
@@ -70,8 +71,15 @@ def _logo_b64(theme_name):
         return base64.b64encode(f.read()).decode("ascii")
 
 
+def _normalize(text):
+    """Collapse whitespace differences (e.g. "Salam Air" vs "SalamAir")
+    between the AIR IQ and Market Place tabs so the same real-world flight
+    isn't mistaken for two different ones."""
+    return re.sub(r"\s+", "", (text or "")).lower()
+
+
 def _flight_key(flight):
-    return (flight.get("airline"), flight.get("flight_no"))
+    return (_normalize(flight.get("airline")), _normalize(flight.get("flight_no")))
 
 
 def _majority_flight(priced_days):
