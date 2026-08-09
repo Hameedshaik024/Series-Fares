@@ -323,12 +323,38 @@ def scrape_range(origin, dest, dates, progress_cb=None):
         with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#to_cmd", dest)
 
+        # A date that's failed twice in a row despite genuinely having
+        # bookable fares (confirmed live for HYD-MCT 11/12 Aug) means
+        # something other than plain network flakiness is going on - log
+        # what the page actually looked like so the real cause shows up in
+        # Render's logs instead of us guessing blind again. JS dialogs
+        # (e.g. an advance-booking-window warning) are also a suspect:
+        # left unhandled they can stall a click/navigation until timeout.
+        current_date_ctx = {"date": None}
+
+        def _on_dialog(dialog):
+            print(f"[airiq_client] JS dialog while on {current_date_ctx['date']}: "
+                  f"{dialog.type} - {dialog.message!r}", flush=True)
+            dialog.dismiss()
+
+        page.on("dialog", _on_dialog)
+
         for idx, d in enumerate(dates, start=1):
             key = d.isoformat()
+            current_date_ctx["date"] = f"{origin}-{dest} {key}"
             airiq_flights, marketplace_flights, error = _fetch_day(page, d)
             results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
             if error:
                 results[key]["error"] = error
+
+            if not airiq_flights and not marketplace_flights:
+                try:
+                    title = page.title()
+                    body_snippet = page.inner_text("body")[:300].replace("\n", " ")
+                except Exception as e:
+                    title, body_snippet = "?", f"(couldn't read page: {e})"
+                print(f"[airiq_client] {origin}-{dest} {key}: no fare after retries "
+                      f"(error={error!r}, page_title={title!r}, body_start={body_snippet!r})", flush=True)
 
             if progress_cb:
                 if error:
