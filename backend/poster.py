@@ -164,8 +164,18 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
             if not is_majority:
                 short_airline = (flight.get("airline") or "").split()[0] if flight.get("airline") else ""
                 flight_no = flight.get("flight_no") or ""
-                dep = (flight.get("time") or "").split(" - ")[0]
-                extra = f'<div class="cell-flight">{short_airline} {flight_no}{f" &middot; {dep}" if dep else ""}</div>'
+                time_txt = flight.get("time") or ""
+                dep_arr = time_txt.split(" - ")
+                time_line = f'{dep_arr[0]} &rarr; {dep_arr[1]}' if len(dep_arr) == 2 else time_txt
+                cell_logo_url = flight.get("logo_url")
+                cell_logo_html = f'<img class="cell-logo" src="{cell_logo_url}">' if cell_logo_url else ""
+                extra = f'''<div class="cell-flight">
+                    {cell_logo_html}
+                    <div class="cell-flight-text">
+                        <div>{short_airline} {flight_no}</div>
+                        <div>{time_line}</div>
+                    </div>
+                </div>'''
 
             row.append(f'''<td class="cell filled" style="background:{bg};color:{fg}">
                 <div class="daynum">{date.day}{badge}</div>
@@ -200,11 +210,13 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
         flight_strip = '<span class="sep">&bull;</span>'.join(items)
         airline_tag = majority_flight.get("airline") or ""
         logo_url = majority_flight.get("logo_url")
-        airline_logo_html = f'<img class="airline-logo" src="{logo_url}" alt="{airline_tag}">' if logo_url else ""
+        airline_block_html = f'''<div class="airline-block">
+            {f'<img class="airline-logo" src="{logo_url}" alt="{airline_tag}">' if logo_url else ''}
+            <span class="airline-name">{airline_tag}</span>
+        </div>'''
     else:
         flight_strip = "<span>No live flight data for this route/range</span>"
-        airline_tag = ""
-        airline_logo_html = ""
+        airline_block_html = ""
 
     origin_label = origin_label or origin
     dest_label = dest_label or dest
@@ -235,25 +247,28 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
   .route .arrow {{ color: {t["accent"]}; margin: 0 10px; }}
   .subtitle {{ font-size: 18px; color: {t["secondary"]}; margin-top: 6px; font-weight: 500; }}
   .period-label {{ font-size: 20px; font-weight: 700; color: {t["accent"]}; text-align: right; }}
-  .airline-tag {{ font-size: 16px; font-weight: 800; color: {t["accent"]}; text-align: right; margin-top: 4px; }}
   .stops-badge {{
     font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px;
     background: {t["muted"]}; color: {t["surface"]};
   }}
   .stops-badge.direct {{ background: {t["badge_bg"]}; color: {t["badge_text"]}; }}
-  .flight-strip {{ display: flex; align-items: center; gap: 20px; background: {t["strip_bg"]}; border-radius: 10px; padding: 12px 22px; margin-bottom: 24px; font-size: 14px; color: {t["secondary"]}; }}
+  .flight-strip {{ display: flex; align-items: center; gap: 20px; background: {t["strip_bg"]}; border-radius: 10px; padding: 10px 22px; margin-bottom: 24px; font-size: 14px; color: {t["secondary"]}; }}
   .flight-strip b {{ color: {t["primary"]}; }}
   .flight-strip .sep {{ color: {t["muted"]}; margin: 0 8px; }}
-  .airline-logo {{ height: 32px; width: 32px; object-fit: contain; border-radius: 6px; background: #fff; padding: 3px; flex-shrink: 0; }}
+  .airline-block {{ display: flex; align-items: center; gap: 10px; flex-shrink: 0; }}
+  .airline-logo {{ height: 34px; width: 34px; object-fit: contain; border-radius: 6px; background: #fff; padding: 3px; flex-shrink: 0; }}
+  .airline-name {{ font-size: 16px; font-weight: 800; color: {t["accent"]}; }}
   table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
   th {{ font-size: 14px; color: {t["muted"]}; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; padding-bottom: 10px; text-align: center; }}
-  .cell {{ height: 100px; border: 2px solid {t["surface"]}; border-radius: 10px; text-align: center; vertical-align: middle; padding: 8px 4px; }}
+  .cell {{ height: 118px; border: 2px solid {t["surface"]}; border-radius: 10px; text-align: center; vertical-align: middle; padding: 8px 4px; }}
   .cell.empty {{ background: transparent; border: none; }}
   .cell.unavailable {{ background: {t["unavail_bg"]}; color: {t["muted"]}; }}
   .daynum {{ font-size: 15px; font-weight: 700; opacity: 0.85; margin-bottom: 4px; }}
   .fare {{ font-size: 19px; font-weight: 800; }}
   .fare-na {{ font-size: 16px; color: {t["muted"]}; }}
-  .cell-flight {{ font-size: 9px; font-weight: 700; opacity: 0.9; margin-top: 3px; line-height: 1.2; }}
+  .cell-flight {{ display: flex; align-items: center; justify-content: center; gap: 5px; margin-top: 4px; }}
+  .cell-logo {{ height: 16px; width: 16px; object-fit: contain; border-radius: 3px; background: #fff; padding: 1px; flex-shrink: 0; }}
+  .cell-flight-text {{ font-size: 9px; font-weight: 700; opacity: 0.92; line-height: 1.3; text-align: left; }}
   .badge {{ font-size: 9px; background: {t["badge_bg"]}; color: {t["badge_text"]}; padding: 2px 6px; border-radius: 8px; font-weight: 800; vertical-align: middle; }}
   .legend {{ display: flex; align-items: center; gap: 18px; margin-top: 28px; padding-top: 20px; border-top: 1px solid {t["grid"]}; }}
   .legend-scale {{ display: flex; align-items: center; gap: 4px; font-size: 13px; color: {t["secondary"]}; }}
@@ -273,10 +288,9 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
     </div>
     <div>
       <div class="period-label">{period_label}</div>
-      <div class="airline-tag">{airline_tag}</div>
     </div>
   </div>
-  <div class="flight-strip">{airline_logo_html}{flight_strip}</div>
+  <div class="flight-strip">{airline_block_html}{flight_strip}</div>
   <table>
     <thead><tr><th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead>
     <tbody>{table_rows}</tbody>
