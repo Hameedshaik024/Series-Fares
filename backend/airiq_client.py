@@ -4,8 +4,10 @@ AirIQ (airiq.in) scraping client.
 Wraps the login (OTP-gated), route discovery, and per-day fare search flows
 against the AirIQ B2B agent portal, using Playwright.
 
-Only reads the default "AIR IQ" tab of search results (never clicks the
-"MARKET PLACE" tab) per the product requirement to ignore market fares.
+Reads both fare tabs per date ("AIR IQ" and "MARKET PLACE" - the same
+`.flit-box` markup is reused for both, just toggled via #AirIQ_Lnk /
+#MarketPlace_Lnk). Which one actually gets used for a given date is a
+pricing decision, not a scraping one - see pricing.py.
 """
 import os
 import re
@@ -250,12 +252,24 @@ def _extract_flights(page):
     return flights
 
 
-def scrape_month(origin, dest, year, month, progress_cb=None):
-    """Returns {day: {"status": "ok"|"sold_out"|"past_or_unavailable", "flights": [...], "cheapest": {...}}}"""
+def _ensure_tab(page, link_id):
+    """Click #AirIQ_Lnk or #MarketPlace_Lnk only if it isn't already the active tab."""
+    cls = page.eval_on_selector(f"#{link_id}", "el => el.className")
+    if "actv" in cls:
+        return
+    with page.expect_navigation(wait_until="load", timeout=30000):
+        page.click(f"#{link_id}")
+
+
+def scrape_range(origin, dest, dates, progress_cb=None):
+    """dates: list of datetime.date, in the order to scrape.
+
+    Returns {date.isoformat(): {"airiq": [flights...], "marketplace": [flights...]}}
+    - a pure scrape, no fare-selection logic (see pricing.pick_fare)."""
     if not has_session():
         raise RuntimeError("not_logged_in")
 
-    days_in_month = calendar.monthrange(year, month)[1]
+    total = len(dates)
     results = {}
 
     with sync_playwright() as p:
@@ -274,34 +288,41 @@ def scrape_month(origin, dest, year, month, progress_cb=None):
         with page.expect_navigation(wait_until="load", timeout=30000):
             page.select_option("#to_cmd", dest)
 
-        for day in range(1, days_in_month + 1):
+        for idx, d in enumerate(dates, start=1):
+            key = d.isoformat()
             try:
-                _pick_day(page, year, month, day)
+                _pick_day(page, d.year, d.month, d.day)
             except Exception:
-                results[day] = {"status": "past_or_unavailable"}
+                results[key] = {"airiq": [], "marketplace": []}
                 if progress_cb:
-                    progress_cb(day, days_in_month, "unavailable")
+                    progress_cb(idx, total, "unavailable")
                 continue
 
             try:
                 with page.expect_navigation(wait_until="load", timeout=30000):
                     page.click("#SearchBtn")
             except Exception as e:
-                results[day] = {"status": "error", "error": str(e)}
+                results[key] = {"airiq": [], "marketplace": [], "error": str(e)}
                 if progress_cb:
-                    progress_cb(day, days_in_month, "error")
+                    progress_cb(idx, total, "error")
                 continue
 
-            flights = _extract_flights(page)
-            if not flights:
-                results[day] = {"status": "sold_out"}
-                if progress_cb:
-                    progress_cb(day, days_in_month, "sold_out")
-            else:
-                cheapest = min(flights, key=lambda f: f["fare_inr"] or float("inf"))
-                results[day] = {"status": "ok", "flights": flights, "cheapest": cheapest}
-                if progress_cb:
-                    progress_cb(day, days_in_month, "ok")
+            try:
+                _ensure_tab(page, "AirIQ_Lnk")
+                airiq_flights = _extract_flights(page)
+            except Exception:
+                airiq_flights = []
+
+            try:
+                _ensure_tab(page, "MarketPlace_Lnk")
+                marketplace_flights = _extract_flights(page)
+            except Exception:
+                marketplace_flights = []
+
+            results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
+            if progress_cb:
+                status = "ok" if (airiq_flights or marketplace_flights) else "sold_out"
+                progress_cb(idx, total, status)
 
         browser.close()
 

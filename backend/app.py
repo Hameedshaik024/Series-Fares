@@ -10,6 +10,7 @@ from flask_cors import CORS
 
 import airiq_client
 import poster
+import pricing
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 AIRIQ_USER = os.environ.get("AIRIQ_USER", "")
@@ -38,14 +39,36 @@ def _prune_old_jobs():
             del _jobs[jid]
 
 
-def _run_generate_job(job_id, origin, dest, year, month, markup, theme, show_logo):
+def _next_30_days():
+    today = datetime.date.today()
+    return [today + datetime.timedelta(days=i) for i in range(30)]
+
+
+def _scrape_and_price(origin, dest, dates, manual_markup, progress_cb):
+    """Shared by both job types: scrape both fare tabs for each date, apply
+    the same pricing.pick_fare rule, return the filtered+sorted rows
+    poster.build expects (dates with no fare from either source are simply
+    dropped)."""
+    raw = airiq_client.scrape_range(origin, dest, dates, progress_cb=progress_cb)
+    priced_days = []
+    for d in dates:
+        day_data = raw.get(d.isoformat(), {"airiq": [], "marketplace": []})
+        priced = pricing.pick_fare(day_data, manual_markup=manual_markup)
+        if priced:
+            priced_days.append({"date": d, **priced})
+    priced_days.sort(key=lambda r: r["date"])
+    return priced_days
+
+
+def _run_generate_job(job_id, origin, dest, markup, theme, show_logo):
     def progress_cb(day, total, status):
         with _jobs_lock:
             _jobs[job_id]["progress"] = {"day": day, "total": total, "last_status": status}
 
     try:
-        fares = airiq_client.scrape_month(origin, dest, year, month, progress_cb=progress_cb)
-        png_bytes = poster.build(origin, dest, year, month, fares, markup, theme, show_logo=show_logo)
+        dates = _next_30_days()
+        priced_days = _scrape_and_price(origin, dest, dates, markup, progress_cb)
+        png_bytes = poster.build(origin, dest, dates, priced_days, theme, show_logo=show_logo)
         with _jobs_lock:
             _jobs[job_id]["status"] = "done"
             _jobs[job_id]["result"] = png_bytes
@@ -59,14 +82,18 @@ def _run_generate_job(job_id, origin, dest, year, month, markup, theme, show_log
             _jobs[job_id]["error"] = str(e)
 
 
-def _run_whatsapp_job(job_id, origin, dest, year, month, markup, theme):
+def _run_whatsapp_job(job_id, origin, dest, theme):
     def progress_cb(day, total, status):
         with _jobs_lock:
             _jobs[job_id]["progress"] = {"day": day, "total": total, "last_status": status}
 
     try:
-        fares = airiq_client.scrape_month(origin, dest, year, month, progress_cb=progress_cb)
-        png_bytes = poster.build(origin, dest, year, month, fares, markup, theme, show_logo=True)
+        dates = _next_30_days()
+        # manual_markup=0: the automatic AirIQ+500/MarketPlace+0 rule in
+        # pricing.pick_fare is what the WhatsApp button's markup now is -
+        # no separate flat add-on on top (see plan for why).
+        priced_days = _scrape_and_price(origin, dest, dates, 0, progress_cb)
+        png_bytes = poster.build(origin, dest, dates, priced_days, theme, show_logo=True)
 
         resp = requests.post(
             f"{WHATSAPP_SIDECAR_URL}/send",
@@ -173,14 +200,12 @@ def generate():
     body = request.get_json(force=True) or {}
     origin = body.get("origin")
     dest = body.get("dest")
-    year = body.get("year")
-    month = body.get("month")
     markup = float(body.get("markup") or 0)
     theme = body.get("theme", "sunset")
     show_logo = bool(body.get("showLogo", True))
 
-    if not all([origin, dest, year, month]):
-        return jsonify({"error": "missing_params", "detail": "origin, dest, year, month are required"}), 400
+    if not all([origin, dest]):
+        return jsonify({"error": "missing_params", "detail": "origin and dest are required"}), 400
     if theme not in poster.THEMES:
         return jsonify({"error": "bad_theme", "detail": f"theme must be one of {list(poster.THEMES)}"}), 400
     if not airiq_client.has_session():
@@ -192,7 +217,7 @@ def generate():
 
     thread = threading.Thread(
         target=_run_generate_job,
-        args=(job_id, origin, dest, int(year), int(month), markup, theme, show_logo),
+        args=(job_id, origin, dest, markup, theme, show_logo),
         daemon=True,
     )
     thread.start()
@@ -265,7 +290,6 @@ def whatsapp_send_monthly():
     if not WHATSAPP_GROUP_ID:
         return jsonify({"error": "server_misconfigured", "detail": "WHATSAPP_GROUP_ID not set"}), 500
 
-    now = datetime.datetime.now()
     job_id = uuid.uuid4().hex
     with _jobs_lock:
         _jobs[job_id] = {
@@ -275,7 +299,7 @@ def whatsapp_send_monthly():
 
     thread = threading.Thread(
         target=_run_whatsapp_job,
-        args=(job_id, "HYD", "DXB", now.year, now.month, 500.0, "sunset"),
+        args=(job_id, "HYD", "DXB", "sunset"),
         daemon=True,
     )
     thread.start()

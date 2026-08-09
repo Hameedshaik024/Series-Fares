@@ -37,22 +37,7 @@ $("gateBtn").addEventListener("click", async () => {
 
 // ---------- App init ----------
 
-function monthOptions() {
-  const now = new Date();
-  const opts = [];
-  for (let i = 0; i < 6; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-    const label = d.toLocaleString("default", { month: "long", year: "numeric" });
-    opts.push({ year: d.getFullYear(), month: d.getMonth() + 1, label });
-  }
-  return opts;
-}
-
 async function initApp(loggedIn) {
-  $("month").innerHTML = monthOptions()
-    .map((o) => `<option value="${o.year}-${o.month}">${o.label}</option>`)
-    .join("");
-
   if (!loggedIn) {
     showRelogin();
   } else {
@@ -128,7 +113,6 @@ $("verifyOtpBtn").addEventListener("click", async () => {
 $("generateBtn").addEventListener("click", async () => {
   const origin = $("origin").value;
   const dest = $("dest").value;
-  const [year, month] = $("month").value.split("-").map(Number);
   const markup = Number($("markup").value || 0);
   const theme = $("theme").value;
   const showLogo = $("showLogo").checked;
@@ -145,7 +129,7 @@ $("generateBtn").addEventListener("click", async () => {
   try {
     const res = await api("/api/generate", {
       method: "POST",
-      body: JSON.stringify({ origin, dest, year, month, markup, theme, showLogo }),
+      body: JSON.stringify({ origin, dest, markup, theme, showLogo }),
     });
 
     if (res.status === 401) {
@@ -168,18 +152,19 @@ $("generateBtn").addEventListener("click", async () => {
     }
 
     const { job_id } = await res.json();
-    await pollJob(job_id, origin, dest, year, month);
+    await pollJob(job_id, origin, dest);
   } catch (e) {
     setStatus("Error: " + e.message, "err");
     $("generateBtn").disabled = false;
   }
 });
 
-async function pollJob(jobId, origin, dest, year, month) {
-  // AirIQ has no bulk fare endpoint, so this genuinely searches one day at
-  // a time server-side (1-3+ min). Polling here means no HTTP/proxy
-  // timeout on this end can kill it - the job keeps running server-side
-  // regardless of how long the tab polls.
+async function pollJob(jobId, origin, dest) {
+  // AirIQ has no bulk fare endpoint, and now checks both the AIR IQ and
+  // Market Place tabs per day, so this genuinely searches day-by-day,
+  // twice each, server-side (2-5+ min for a 30-day range). Polling here
+  // means no HTTP/proxy timeout on this end can kill it - the job keeps
+  // running server-side regardless of how long the tab polls.
   while (true) {
     await new Promise((r) => setTimeout(r, 2500));
 
@@ -193,8 +178,8 @@ async function pollJob(jobId, origin, dest, year, month) {
 
     if (data.status === "running") {
       const p = data.progress;
-      const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ day-by-day…";
-      setStatus(`<span class="spinner"></span> ${progressText} — this takes 1-3 minutes, please wait…`, "");
+      const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ + Market Place day-by-day…";
+      setStatus(`<span class="spinner"></span> ${progressText} — this takes a few minutes, please wait…`, "");
       continue;
     }
 
@@ -213,7 +198,7 @@ async function pollJob(jobId, origin, dest, year, month) {
     const imgRes = await api(`/api/generate/result/${jobId}`);
     const blob = await imgRes.blob();
     const url = URL.createObjectURL(blob);
-    $("result").innerHTML = `<img src="${url}"><br><a href="${url}" download="${origin}-${dest}-${year}-${month}-fares.png">Download PNG</a>`;
+    $("result").innerHTML = `<img src="${url}"><br><a href="${url}" download="${origin}-${dest}-fares.png">Download PNG</a>`;
     setStatus("Done.", "ok");
     $("generateBtn").disabled = false;
     return;
@@ -328,8 +313,8 @@ $("sendWaBtn").addEventListener("click", async () => {
 
       if (data.status === "running") {
         const p = data.progress;
-        const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ…";
-        set(`<span class="spinner"></span> ${progressText} — this takes 1-3 minutes…`, "");
+        const progressText = p ? `Day ${p.day}/${p.total} (${p.last_status})` : "Scraping AirIQ + Market Place…";
+        set(`<span class="spinner"></span> ${progressText} — this takes a few minutes…`, "");
         continue;
       }
       if (data.status === "error") {

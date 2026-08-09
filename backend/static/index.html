@@ -44,7 +44,7 @@
 <body>
 <div class="wrap">
   <h1>Sea Sky Destinations</h1>
-  <div class="sub">Monthly fare poster generator (AirIQ live fares)</div>
+  <div class="sub">Next-30-days fare poster generator (AirIQ live fares)</div>
 
   <div id="gate" class="card">
     <label for="pw">Access password</label>
@@ -78,21 +78,13 @@
           <select id="dest"><option>Select origin first</option></select>
         </div>
       </div>
-      <div class="row">
-        <div>
-          <label for="month">Month</label>
-          <select id="month"></select>
-        </div>
-        <div>
-          <label for="theme">Theme</label>
-          <select id="theme">
-            <option value="sunset" selected>Sunset (coral)</option>
-            <option value="sky">Sky (blue)</option>
-            <option value="ocean">Ocean (dark navy)</option>
-          </select>
-        </div>
-      </div>
-      <label for="markup">Increase fare by (₹, flat, optional)</label>
+      <label for="theme">Theme</label>
+      <select id="theme">
+        <option value="sunset" selected>Sunset (coral)</option>
+        <option value="sky">Sky (blue)</option>
+        <option value="ocean">Ocean (dark navy)</option>
+      </select>
+      <label for="markup">Increase fare by (₹, flat, optional, on top of the automatic AirIQ markup)</label>
       <input type="number" id="markup" placeholder="0" min="0" step="50">
 
       <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:normal;font-weight:600;color:var(--ink);margin-bottom:20px;">
@@ -122,7 +114,7 @@
 
     <div class="card">
       <div style="font-weight:700;margin-bottom:4px;">📤 One-click send</div>
-      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">HYD &rarr; DXB &middot; current month &middot; +&#8377;500 &middot; posts straight into your WhatsApp group.</div>
+      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">HYD &rarr; DXB &middot; next 30 days &middot; AirIQ fares +&#8377;500, Market Place as-is &middot; posts straight into your WhatsApp group.</div>
       <button id="sendWaBtn">Send HYD → DXB to WhatsApp</button>
       <div id="waSendStatus" style="font-size:14px;margin-top:14px;min-height:20px;"></div>
     </div>

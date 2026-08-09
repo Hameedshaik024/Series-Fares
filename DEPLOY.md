@@ -69,17 +69,23 @@ the WhatsApp panel will just show "service isn't reachable".)
 - Only one AirIQ session at a time — the backend keeps a single browser
   login, not one per user. Fine for personal/small-team use, not built for
   many concurrent users.
-- A "Generate" call takes **1-3 minutes** (AirIQ has no bulk fare endpoint;
-  the backend searches one day at a time). The frontend shows a loading
-  state during this — don't close the tab.
-- Only the **AIR IQ** fare tab is read; the **MARKET PLACE** tab is never
-  clicked, per your requirement to ignore market fares.
+- Every "Generate" always covers the **next 30 days from today** (no month
+  picker) and checks **both** the AIR IQ and Market Place tabs for each
+  date, so it takes a couple of minutes (AirIQ has no bulk fare endpoint;
+  the backend searches day-by-day, twice per day). The frontend shows a
+  loading state with live progress during this — don't close the tab.
+- Fare source rule (`backend/pricing.py`, shared by both the manual
+  generator and the WhatsApp button): if AIR IQ has any fare for a date,
+  use its cheapest and add a flat +₹500; otherwise fall back to Market
+  Place's cheapest fare, unmarked up. Dates with no fare from either
+  source are simply left off the poster.
 - If AirIQ changes their page structure (field IDs, CSS classes), the
   scraper (`backend/airiq_client.py`) will need updating to match.
 - The WhatsApp sidecar (`backend/whatsapp/`) runs as a background process
   inside the same container, reachable only via `localhost` — it's never
   exposed publicly. Flask proxies the QR/groups endpoints and calls
   `/send` directly over loopback. See `backend/whatsapp/index.js`.
-- The "Send HYD → DXB to WhatsApp" button is hardcoded to that one route,
-  the current month, and a flat +₹500 markup, per the original request —
-  not a general-purpose route picker.
+- The "Send HYD → DXB to WhatsApp" button is hardcoded to that one route
+  and the next 30 days, per the original request — not a general-purpose
+  route picker. Its markup is the same automatic AirIQ+500/Market Place+0
+  rule above, no separate flat add-on.
