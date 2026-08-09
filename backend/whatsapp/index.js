@@ -63,7 +63,15 @@ async function startSock() {
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       console.log("WhatsApp connection closed.", { statusCode, loggedOut });
       if (!loggedOut) {
-        startSock().catch((e) => console.error("reconnect failed", e));
+        // Without a delay here, an unlinked session (the normal state right
+        // after every deploy, since this state is as ephemeral as AirIQ's)
+        // reconnects in a tight loop - each attempt opens a socket, gets a
+        // fresh QR, times out waiting to be scanned, closes, repeat. That
+        // pegs the container's CPU and can starve the Python worker from
+        // ever finishing its own startup within Render's port-scan window.
+        setTimeout(() => {
+          startSock().catch((e) => console.error("reconnect failed", e));
+        }, 5000);
       }
     }
   });
