@@ -268,6 +268,48 @@ def _ensure_tab(page, link_id):
         page.click(f"#{link_id}")
 
 
+def _fetch_one_date(page, d):
+    """One attempt at fetching a single date's fares.
+    Returns (airiq_flights, marketplace_flights, status), status one of:
+    "ok" / "sold_out" / "unavailable" (date wasn't clickable at all - a
+    real restriction, not worth retrying) / "error" (the search itself
+    failed to navigate)."""
+    try:
+        _pick_day(page, d.year, d.month, d.day)
+    except Exception:
+        return [], [], "unavailable"
+
+    try:
+        with page.expect_navigation(wait_until="load", timeout=30000):
+            page.click("#SearchBtn")
+    except Exception:
+        return [], [], "error"
+
+    try:
+        _ensure_tab(page, "AirIQ_Lnk")
+        airiq_flights = _extract_flights(page)
+    except Exception:
+        airiq_flights = []
+
+    if airiq_flights:
+        # pricing.pick_fare always prefers AIR IQ over Market Place
+        # whenever AIR IQ has any fare, so Market Place's data would
+        # never actually get used for this date - skip loading it. Pure
+        # time saved, no behavior change (confirmed against pricing.py's
+        # rule), unlike the various wait/retry attempts that turned out to
+        # make things slower without actually fixing anything.
+        marketplace_flights = []
+    else:
+        try:
+            _ensure_tab(page, "MarketPlace_Lnk")
+            marketplace_flights = _extract_flights(page)
+        except Exception:
+            marketplace_flights = []
+
+    status = "ok" if (airiq_flights or marketplace_flights) else "sold_out"
+    return airiq_flights, marketplace_flights, status
+
+
 def scrape_range(origin, dest, dates, progress_cb=None):
     """dates: list of datetime.date, in the order to scrape.
 
@@ -297,48 +339,20 @@ def scrape_range(origin, dest, dates, progress_cb=None):
 
         for idx, d in enumerate(dates, start=1):
             key = d.isoformat()
-            try:
-                _pick_day(page, d.year, d.month, d.day)
-            except Exception:
-                results[key] = {"airiq": [], "marketplace": []}
-                if progress_cb:
-                    progress_cb(idx, total, "unavailable")
-                continue
+            airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
 
-            try:
-                with page.expect_navigation(wait_until="load", timeout=30000):
-                    page.click("#SearchBtn")
-            except Exception as e:
-                results[key] = {"airiq": [], "marketplace": [], "error": str(e)}
-                if progress_cb:
-                    progress_cb(idx, total, "error")
-                continue
-
-            try:
-                _ensure_tab(page, "AirIQ_Lnk")
-                airiq_flights = _extract_flights(page)
-            except Exception:
-                airiq_flights = []
-
-            if airiq_flights:
-                # pricing.pick_fare always prefers AIR IQ over Market Place
-                # whenever AIR IQ has any fare, so Market Place's data would
-                # never actually get used for this date - skip loading it.
-                # Pure time saved, no behavior change (confirmed against
-                # pricing.py's rule), unlike the various wait/retry attempts
-                # that turned out to make things slower without actually
-                # fixing anything.
-                marketplace_flights = []
-            else:
-                try:
-                    _ensure_tab(page, "MarketPlace_Lnk")
-                    marketplace_flights = _extract_flights(page)
-                except Exception:
-                    marketplace_flights = []
+            if status == "sold_out":
+                # Confirmed live: the exact same date, same code, flips
+                # between having and not having fares across separate runs
+                # - genuine transient flakiness on AirIQ's side, not a
+                # deterministic failure. One quick extra look (same fast
+                # timeouts, no long wait) gives it a second chance without
+                # the multi-minute slowdown the longer-wait approach cost.
+                page.wait_for_timeout(500)
+                airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
 
             results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
             if progress_cb:
-                status = "ok" if (airiq_flights or marketplace_flights) else "sold_out"
                 progress_cb(idx, total, status)
 
         browser.close()
