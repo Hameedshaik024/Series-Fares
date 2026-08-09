@@ -272,6 +272,23 @@ def _ensure_tab(page, link_id):
         page.click(f"#{link_id}")
 
 
+def _wait_for_results(page, timeout=12000):
+    """After landing on a tab (initial search, or a tab switch), the flight
+    cards (.flit-box) render asynchronously - "load" firing, or the tab
+    link existing, doesn't mean they're there yet. Confirmed live: dates
+    with more results (real fares) take longer to render than empty ones,
+    so extracting right away raced ahead of the page on exactly the dates
+    that had fares, and the failure moved to whichever tab hit the race
+    for a given date. A date can also genuinely have zero flights, which
+    Playwright can't tell apart from "still loading" - so a timeout here
+    is treated as "no results", not an error; _extract_flights will
+    correctly return an empty list either way."""
+    try:
+        page.wait_for_selector(".flit-box", state="attached", timeout=timeout)
+    except Exception:
+        pass
+
+
 def _fetch_day(page, d, max_attempts=2):
     """Search fares for one date, retrying once (by default) if the first
     attempt comes back completely empty on both tabs, or errors outright.
@@ -286,15 +303,12 @@ def _fetch_day(page, d, max_attempts=2):
             _pick_day(page, d.year, d.month, d.day)
             with page.expect_navigation(wait_until="load", timeout=30000):
                 page.click("#SearchBtn")
-            # "load" firing doesn't mean the results tabs have rendered yet -
-            # dates with more flight options (real results) take longer to
-            # build than dates with none, so checking #AirIQ_Lnk right after
-            # "load" raced ahead of the page on exactly the dates that had
-            # fares. Wait for it to actually attach first.
             page.wait_for_selector("#AirIQ_Lnk", state="attached", timeout=15000)
             _ensure_tab(page, "AirIQ_Lnk")
+            _wait_for_results(page)
             airiq_flights = _extract_flights(page)
             _ensure_tab(page, "MarketPlace_Lnk")
+            _wait_for_results(page)
             marketplace_flights = _extract_flights(page)
             if airiq_flights or marketplace_flights:
                 return airiq_flights, marketplace_flights, None
