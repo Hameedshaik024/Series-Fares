@@ -205,6 +205,12 @@ def _extract_flights(page):
     for box in page.query_selector_all(".flit-box"):
         airline_el = box.query_selector(".flit-item-img p")
         airline = airline_el.inner_text().strip() if airline_el else "?"
+        logo_el = box.query_selector(".flit-item-img img")
+        logo_url = None
+        if logo_el:
+            src = logo_el.get_attribute("src") or ""
+            if src:
+                logo_url = src if src.startswith("http") else "https://airiq.in/" + src.lstrip("/")
         flightno_el = box.query_selector(".flit-item5")
         flight_no = flightno_el.inner_text().strip() if flightno_el else None
         time_el = box.query_selector(".flit-item6")
@@ -242,6 +248,7 @@ def _extract_flights(page):
         fare = rate_el.get_attribute("data-inr") if rate_el else None
         flights.append({
             "airline": airline,
+            "logo_url": logo_url,
             "flight_no": flight_no,
             "time": time_txt,
             "duration": duration,

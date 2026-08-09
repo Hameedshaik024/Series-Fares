@@ -1,17 +1,25 @@
 """
-Renders a themed fare-list poster PNG covering a rolling range of dates
-(typically the next 30 days from today). Input is already-priced,
-already-filtered rows from pricing.pick_fare() - this module only renders,
-it makes no fare-selection decisions itself.
+Renders a themed fare-calendar poster PNG covering a rolling range of
+dates (typically the next 30 days from today). Input is already-priced,
+already-filtered rows from pricing.pick_fare() - this module only
+renders, it makes no fare-selection decisions itself.
+
+Layout: a calendar grid (like a real month-view fare calendar), sized to
+span the whole requested date range even if that crosses a month
+boundary. Most dates fly the same flight, so that flight's full details
+(airline logo, timing, duration, baggage) are shown once in a header
+strip; only dates flying something different get their own compact
+flight info inline in the cell.
 """
 import os
 import base64
+import datetime
+from collections import Counter
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
-WEEKDAY_ABBR = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 MONTH_ABBR = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 THEMES = {
@@ -19,7 +27,7 @@ THEMES = {
         page_bg="#f9f9f7", surface="#fcfcfb", primary="#0b0b0b", secondary="#52514e",
         muted="#898781", accent="#256abf", border="#0b0b0b", grid="#e1e0d9",
         ramp=["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"],
-        row_bg="#fcfcfb", row_border="#e1e0d9",
+        unavail_bg="#f0efec", strip_bg="#f0efec",
         badge_bg="#0ca30c", badge_text="#ffffff",
         logo="logo_navy.png",
     ),
@@ -27,7 +35,7 @@ THEMES = {
         page_bg="#0a1628", surface="#0f2138", primary="#ffffff", secondary="#9fb4c9",
         muted="#6b8299", accent="#4dd4c0", border="#ffffff", grid="#1e3552",
         ramp=["#ffe8a3", "#ffd166", "#f5b942", "#e8a020", "#c67f0e", "#9c6108", "#6e4405"],
-        row_bg="#16283e", row_border="#1e3552",
+        unavail_bg="#16232f", strip_bg="#16283e",
         badge_bg="#4dd4c0", badge_text="#0b0b0b",
         logo="logo_white.png",
     ),
@@ -35,7 +43,7 @@ THEMES = {
         page_bg="#fdf3ea", surface="#fffaf3", primary="#2b1c12", secondary="#7a6455",
         muted="#a1897a", accent="#d85f31", border="#2b1c12", grid="#eddcc8",
         ramp=["#ffe4d6", "#ffc9ab", "#ffa679", "#f3804f", "#d85f31", "#b0431e", "#7a2c10"],
-        row_bg="#fffaf3", row_border="#eddcc8",
+        unavail_bg="#f5ebe0", strip_bg="#f5e8da",
         badge_bg="#2e8b57", badge_text="#ffffff",
         logo="logo_coral.png",
     ),
@@ -62,24 +70,61 @@ def _logo_b64(theme_name):
         return base64.b64encode(f.read()).decode("ascii")
 
 
+def _flight_key(flight):
+    return (flight.get("airline"), flight.get("flight_no"))
+
+
+def _majority_flight(priced_days):
+    """The (airline, flight_no) most dates fly, and a representative flight
+    dict for it (details shown once in the header strip)."""
+    if not priced_days:
+        return None, None
+    counts = Counter(_flight_key(d["flight"]) for d in priced_days)
+    majority_key = counts.most_common(1)[0][0]
+    for d in priced_days:
+        if _flight_key(d["flight"]) == majority_key:
+            return majority_key, d["flight"]
+    return majority_key, None
+
+
+def _week_grid(dates):
+    """Sunday-start weeks fully covering the first..last date in `dates`."""
+    first, last = dates[0], dates[-1]
+    # date.weekday(): Mon=0..Sun=6. We want Sunday-start weeks.
+    days_since_sunday = (first.weekday() + 1) % 7
+    grid_start = first - datetime.timedelta(days=days_since_sunday)
+    days_until_saturday = 6 - ((last.weekday() + 1) % 7)
+    grid_end = last + datetime.timedelta(days=days_until_saturday)
+
+    weeks = []
+    cur = grid_start
+    while cur <= grid_end:
+        week = [cur + datetime.timedelta(days=i) for i in range(7)]
+        weeks.append(week)
+        cur += datetime.timedelta(days=7)
+    return weeks
+
+
 def build_html(origin, dest, dates, priced_days, theme="sunset",
                 origin_label=None, dest_label=None, show_logo=True):
     """
-    dates: full requested list of datetime.date (used only for the header's
-        period label - e.g. still shown even if some of those dates ended
-        up with no fare and got filtered out of priced_days).
-    priced_days: list of {"date": date, "source", "flight", "base_fare",
-        "final_fare"} - already filtered (no unpriced dates) and sorted
-        ascending by date.
+    dates: full requested list of datetime.date (defines the grid span and
+        the header's period label, even for dates that ended up with no
+        fare and are shown as empty cells).
+    priced_days: list of {"date", "source", "flight", "base_fare",
+        "final_fare"} - already filtered (no unpriced dates).
     """
     t = THEMES[theme]
     logo_b64 = _logo_b64(theme) if show_logo else None
 
+    by_date = {d["date"]: d for d in priced_days}
     has_fares = bool(priced_days)
     fares = [d["final_fare"] for d in priced_days]
     min_fare = min(fares) if has_fares else 0
     max_fare = max(fares) if has_fares else 0
     cheapest_date = min(priced_days, key=lambda d: d["final_fare"])["date"] if has_fares else None
+
+    majority_key, majority_flight = _majority_flight(priced_days)
 
     def color_for(fare):
         ramp = t["ramp"]
@@ -89,57 +134,77 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
             idx = round((fare - min_fare) / (max_fare - min_fare) * (len(ramp) - 1))
         return ramp[idx]
 
-    rows_html = []
-    for d in priced_days:
-        date = d["date"]
-        flight = d["flight"]
-        fare = d["final_fare"]
+    weeks = _week_grid(dates) if dates else []
+    range_start, range_end = (dates[0], dates[-1]) if dates else (None, None)
 
-        bg = color_for(fare)
-        fg = _text_for(bg, "#ffffff", t["primary"])
-        is_best = date == cheapest_date
+    cells_html = []
+    for week in weeks:
+        row = []
+        for date in week:
+            if date < range_start or date > range_end:
+                row.append('<td class="cell empty"></td>')
+                continue
 
-        stops = flight.get("stops")
+            entry = by_date.get(date)
+            if not entry:
+                row.append(f'''<td class="cell unavailable">
+                    <div class="daynum">{date.day}</div>
+                    <div class="fare-na">&mdash;</div>
+                </td>''')
+                continue
+
+            fare = entry["final_fare"]
+            flight = entry["flight"]
+            bg = color_for(fare)
+            fg = _text_for(bg, "#ffffff", t["primary"])
+            badge = ' <span class="badge">BEST</span>' if date == cheapest_date else ""
+
+            is_majority = _flight_key(flight) == majority_key
+            extra = ""
+            if not is_majority:
+                short_airline = (flight.get("airline") or "").split()[0] if flight.get("airline") else ""
+                flight_no = flight.get("flight_no") or ""
+                dep = (flight.get("time") or "").split(" - ")[0]
+                extra = f'<div class="cell-flight">{short_airline} {flight_no}{f" &middot; {dep}" if dep else ""}</div>'
+
+            row.append(f'''<td class="cell filled" style="background:{bg};color:{fg}">
+                <div class="daynum">{date.day}{badge}</div>
+                <div class="fare">&#8377;{fare:,.0f}</div>
+                {extra}
+            </td>''')
+        cells_html.append("<tr>" + "".join(row) + "</tr>")
+
+    table_rows = "\n".join(cells_html)
+
+    # header flight strip: the majority flight's full details
+    if majority_flight:
+        stops = majority_flight.get("stops")
         is_direct = bool(stops) and "non" in stops.lower() and "stop" in stops.lower()
-        stops_badge = ""
+        items = []
         if stops:
-            if is_direct:
-                stops_badge = '<span class="stops-badge direct">Direct</span>'
-            else:
-                stops_badge = f'<span class="stops-badge">{stops}</span>'
-
-        meta_items = [stops_badge] if stops_badge else []
-        time_txt = flight.get("time")
+            items.append(
+                '<span class="stops-badge direct">Direct Flight</span>' if is_direct
+                else f'<span class="stops-badge">{stops}</span>'
+            )
+        if majority_flight.get("flight_no"):
+            items.append(f'<span>Flight <b>{majority_flight["flight_no"]}</b></span>')
+        time_txt = majority_flight.get("time")
         if time_txt:
             dep_arr = time_txt.split(" - ")
             if len(dep_arr) == 2:
-                meta_items.append(f'<span>{dep_arr[0]} &rarr; {dep_arr[1]}</span>')
-        if flight.get("duration"):
-            meta_items.append(f'<span>{flight["duration"]}</span>')
-        if flight.get("baggage"):
-            meta_items.append(f'<span>{flight["baggage"]}</span>')
-        meta_html = '<span class="sep">&bull;</span>'.join(meta_items)
-
-        flight_no = flight.get("flight_no") or ""
-        airline = flight.get("airline") or ""
-
-        badge_html = ' <span class="badge">BEST</span>' if is_best else ""
-
-        rows_html.append(f'''
-        <div class="row">
-          <div class="row-date" style="background:{bg};color:{fg}">
-            <div class="date-wd">{WEEKDAY_ABBR[date.weekday()]}</div>
-            <div class="date-num">{date.day}</div>
-            <div class="date-mo">{MONTH_ABBR[date.month]}</div>
-          </div>
-          <div class="row-flight">
-            <div class="row-airline">{airline} <span class="flightno">{flight_no}</span></div>
-            <div class="row-meta">{meta_html}</div>
-          </div>
-          <div class="row-fare">&#8377;{fare:,.0f}{badge_html}</div>
-        </div>''')
-
-    rows_block = "\n".join(rows_html) if rows_html else '<div class="empty-msg">No fares found for this route in the selected range.</div>'
+                items.append(f'<span>Dep <b>{dep_arr[0]}</b> &rarr; Arr <b>{dep_arr[1]}</b></span>')
+        if majority_flight.get("duration"):
+            items.append(f'<span>Duration <b>{majority_flight["duration"]}</b></span>')
+        if majority_flight.get("baggage"):
+            items.append(f'<span>Baggage <b>{majority_flight["baggage"]}</b></span>')
+        flight_strip = '<span class="sep">&bull;</span>'.join(items)
+        airline_tag = majority_flight.get("airline") or ""
+        logo_url = majority_flight.get("logo_url")
+        airline_logo_html = f'<img class="airline-logo" src="{logo_url}" alt="{airline_tag}">' if logo_url else ""
+    else:
+        flight_strip = "<span>No live flight data for this route/range</span>"
+        airline_tag = ""
+        airline_logo_html = ""
 
     origin_label = origin_label or origin
     dest_label = dest_label or dest
@@ -151,7 +216,7 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
         period_label = ""
 
     summary = (
-        f'Best fare: <b>&#8377;{min_fare:,.0f}</b> on {WEEKDAY_ABBR[cheapest_date.weekday()].title()} {cheapest_date.day} {MONTH_ABBR[cheapest_date.month]} '
+        f'Best fare: <b>&#8377;{min_fare:,.0f}</b> on {cheapest_date.day} {MONTH_ABBR[cheapest_date.month]} '
         f'&nbsp;|&nbsp; Range: &#8377;{min_fare:,.0f} &ndash; &#8377;{max_fare:,.0f}'
         if has_fares else "No fares found for this route in the selected range"
     )
@@ -161,41 +226,35 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
 <title>{origin}-{dest} Fares</title>
 <style>
   * {{ box-sizing: border-box; margin:0; padding:0; }}
-  body {{ width: 1100px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {t["page_bg"]}; color: {t["primary"]}; }}
-  .poster {{ width: 1100px; background: {t["surface"]}; padding: 56px 60px 48px; }}
+  body {{ width: 1200px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {t["page_bg"]}; color: {t["primary"]}; }}
+  .poster {{ width: 1200px; background: {t["surface"]}; padding: 56px 64px 48px; }}
   .brand-bar {{ display: flex; justify-content: flex-end; margin-bottom: 24px; }}
   .brand-bar img {{ height: 46px; width: auto; }}
-  .header {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid {t["border"]}; padding-bottom: 20px; margin-bottom: 28px; }}
+  .header {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid {t["border"]}; padding-bottom: 20px; margin-bottom: 20px; }}
   .route {{ font-size: 44px; font-weight: 800; letter-spacing: 0.5px; }}
   .route .arrow {{ color: {t["accent"]}; margin: 0 10px; }}
   .subtitle {{ font-size: 18px; color: {t["secondary"]}; margin-top: 6px; font-weight: 500; }}
   .period-label {{ font-size: 20px; font-weight: 700; color: {t["accent"]}; text-align: right; }}
+  .airline-tag {{ font-size: 16px; font-weight: 800; color: {t["accent"]}; text-align: right; margin-top: 4px; }}
   .stops-badge {{
-    font-size: 11px; font-weight: 800; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px;
     background: {t["muted"]}; color: {t["surface"]};
   }}
   .stops-badge.direct {{ background: {t["badge_bg"]}; color: {t["badge_text"]}; }}
-  .rows {{ display: flex; flex-direction: column; gap: 10px; }}
-  .row {{
-    display: flex; align-items: center; gap: 20px;
-    background: {t["row_bg"]}; border: 1px solid {t["row_border"]}; border-radius: 12px;
-    padding: 12px 20px;
-  }}
-  .row-date {{
-    flex: 0 0 64px; height: 64px; border-radius: 10px;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-  }}
-  .date-wd {{ font-size: 10px; font-weight: 800; letter-spacing: 0.5px; opacity: 0.85; }}
-  .date-num {{ font-size: 22px; font-weight: 800; line-height: 1.1; }}
-  .date-mo {{ font-size: 10px; font-weight: 700; opacity: 0.85; }}
-  .row-flight {{ flex: 1 1 auto; min-width: 0; }}
-  .row-airline {{ font-size: 16px; font-weight: 800; color: {t["accent"]}; }}
-  .row-airline .flightno {{ font-size: 13px; font-weight: 600; color: {t["secondary"]}; margin-left: 6px; }}
-  .row-meta {{ font-size: 13px; color: {t["secondary"]}; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-  .row-meta .sep {{ color: {t["muted"]}; }}
-  .row-fare {{ flex: 0 0 auto; font-size: 22px; font-weight: 800; color: {t["primary"]}; white-space: nowrap; }}
-  .badge {{ font-size: 9px; background: {t["badge_bg"]}; color: {t["badge_text"]}; padding: 2px 7px; border-radius: 8px; font-weight: 800; vertical-align: middle; margin-left: 4px; }}
-  .empty-msg {{ padding: 40px; text-align: center; color: {t["muted"]}; font-size: 16px; }}
+  .flight-strip {{ display: flex; align-items: center; gap: 20px; background: {t["strip_bg"]}; border-radius: 10px; padding: 12px 22px; margin-bottom: 24px; font-size: 14px; color: {t["secondary"]}; }}
+  .flight-strip b {{ color: {t["primary"]}; }}
+  .flight-strip .sep {{ color: {t["muted"]}; margin: 0 8px; }}
+  .airline-logo {{ height: 32px; width: 32px; object-fit: contain; border-radius: 6px; background: #fff; padding: 3px; flex-shrink: 0; }}
+  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+  th {{ font-size: 14px; color: {t["muted"]}; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; padding-bottom: 10px; text-align: center; }}
+  .cell {{ height: 100px; border: 2px solid {t["surface"]}; border-radius: 10px; text-align: center; vertical-align: middle; padding: 8px 4px; }}
+  .cell.empty {{ background: transparent; border: none; }}
+  .cell.unavailable {{ background: {t["unavail_bg"]}; color: {t["muted"]}; }}
+  .daynum {{ font-size: 15px; font-weight: 700; opacity: 0.85; margin-bottom: 4px; }}
+  .fare {{ font-size: 19px; font-weight: 800; }}
+  .fare-na {{ font-size: 16px; color: {t["muted"]}; }}
+  .cell-flight {{ font-size: 9px; font-weight: 700; opacity: 0.9; margin-top: 3px; line-height: 1.2; }}
+  .badge {{ font-size: 9px; background: {t["badge_bg"]}; color: {t["badge_text"]}; padding: 2px 6px; border-radius: 8px; font-weight: 800; vertical-align: middle; }}
   .legend {{ display: flex; align-items: center; gap: 18px; margin-top: 28px; padding-top: 20px; border-top: 1px solid {t["grid"]}; }}
   .legend-scale {{ display: flex; align-items: center; gap: 4px; font-size: 13px; color: {t["secondary"]}; }}
   .swatch {{ width: 22px; height: 14px; border-radius: 3px; }}
@@ -212,9 +271,16 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
       <div class="route">{origin} <span class="arrow">&#9992;</span> {dest}</div>
       <div class="subtitle">{origin_label} &rarr; {dest_label} &middot; One-way Economy Fares</div>
     </div>
-    <div class="period-label">{period_label}</div>
+    <div>
+      <div class="period-label">{period_label}</div>
+      <div class="airline-tag">{airline_tag}</div>
+    </div>
   </div>
-  <div class="rows">{rows_block}</div>
+  <div class="flight-strip">{airline_logo_html}{flight_strip}</div>
+  <table>
+    <thead><tr><th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
   {f'''<div class="legend">
     <div class="legend-scale">
       <span>Cheaper</span>
@@ -226,7 +292,7 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
     </div>
     <div class="summary">{summary}</div>
   </div>''' if has_fares else ''}
-  <div class="footer">Fares in INR, per adult, subject to availability &amp; change.</div>
+  <div class="footer">Fares in INR, per adult, subject to availability &amp; change. Dates with no fares are left blank.</div>
 </div>
 </body>
 </html>
@@ -238,7 +304,7 @@ def render_png(html, out_path=None):
     """Renders the poster HTML to PNG bytes (or writes to out_path if given)."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1100, "height": 800}, device_scale_factor=2)
+        page = browser.new_page(viewport={"width": 1200, "height": 800}, device_scale_factor=2)
         page.set_content(html, wait_until="networkidle")
         if out_path:
             page.locator(".poster").screenshot(path=out_path)
