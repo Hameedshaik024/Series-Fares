@@ -174,7 +174,17 @@ async function pollJob(jobId, origin, dest) {
       $("generateBtn").disabled = false;
       return;
     }
-    const data = await res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (e) {
+      // Server returned something that isn't JSON (e.g. an HTML error page
+      // from a container restart) - the job is gone either way, no point
+      // continuing to poll.
+      setStatus("Lost connection to the server mid-job (it may have restarted) — try again.", "err");
+      $("generateBtn").disabled = false;
+      return;
+    }
 
     if (data.status === "running") {
       const p = data.progress;
@@ -309,7 +319,17 @@ $("sendWaBtn").addEventListener("click", async () => {
     while (true) {
       await new Promise((r) => setTimeout(r, 2500));
       const sres = await api(`/api/generate/status/${jobId}`);
-      const data = await sres.json();
+      let data;
+      try {
+        data = await sres.json();
+      } catch (e) {
+        // Server returned something that isn't JSON (e.g. an HTML error
+        // page from a container restart mid-job) - whatever routes had
+        // already sent are done; the rest didn't happen and the job is
+        // gone, so there's nothing left to poll for.
+        set("Lost connection to the server mid-job (it may have restarted) — routes already sent went through; check WhatsApp for the rest, then try again.", "err");
+        break;
+      }
 
       if (data.status === "running") {
         const p = data.progress;
