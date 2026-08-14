@@ -52,12 +52,10 @@ def _next_30_days():
     return [today + datetime.timedelta(days=i) for i in range(30)]
 
 
-def _scrape_and_price(origin, dest, dates, manual_markup, progress_cb):
-    """Shared by both job types: scrape both fare tabs for each date, apply
-    the same pricing.pick_fare rule, return the filtered+sorted rows
-    poster.build expects (dates with no fare from either source are simply
-    dropped)."""
-    raw = airiq_client.scrape_range(origin, dest, dates, progress_cb=progress_cb)
+def _price_scraped(raw, dates, manual_markup):
+    """Applies the shared pricing.pick_fare rule to a raw scrape result,
+    returning the filtered+sorted rows poster.build expects (dates with no
+    fare from either source are simply dropped)."""
     priced_days = []
     for d in dates:
         day_data = raw.get(d.isoformat(), {"airiq": [], "marketplace": []})
@@ -66,6 +64,13 @@ def _scrape_and_price(origin, dest, dates, manual_markup, progress_cb):
             priced_days.append({"date": d, **priced})
     priced_days.sort(key=lambda r: r["date"])
     return priced_days
+
+
+def _scrape_and_price(origin, dest, dates, manual_markup, progress_cb):
+    """Shared by both job types: scrape both fare tabs for each date, apply
+    the same pricing.pick_fare rule."""
+    raw = airiq_client.scrape_range(origin, dest, dates, progress_cb=progress_cb)
+    return _price_scraped(raw, dates, manual_markup)
 
 
 def _run_generate_job(job_id, origin, dest, markup, theme, show_logo):
@@ -94,32 +99,79 @@ def _run_whatsapp_job(job_id, theme):
     """Builds and sends a poster for each route in WHATSAPP_ROUTES, into its
     own group, same caption. One route's failure (no fares, send error,
     missing group id) doesn't stop the others - each is recorded
-    independently so a partial run still gets the working routes out."""
+    independently so a partial run still gets the working routes out.
+
+    Scrapes all active routes with ONE shared browser
+    (airiq_client.scrape_multiple_routes) rather than launching a separate
+    Chromium instance per route - launching 3 back-to-back was the likely
+    cause of a confirmed Render free-tier OOM crash on a 3-route send."""
     dates = _next_30_days()
-    total_routes = len(WHATSAPP_ROUTES)
     results = {}
 
-    def progress_cb(route_label, route_idx):
-        def _cb(day, total, status):
-            with _jobs_lock:
-                _jobs[job_id]["progress"] = {
-                    "route": route_label, "route_num": route_idx, "route_total": total_routes,
-                    "day": day, "total": total, "last_status": status,
-                }
-        return _cb
-
-    for idx, (origin, dest, group_id) in enumerate(WHATSAPP_ROUTES, start=1):
-        label = f"{origin}-{dest}"
+    active_routes = [(o, d, g) for o, d, g in WHATSAPP_ROUTES if g]
+    for origin, dest, group_id in WHATSAPP_ROUTES:
         if not group_id:
-            results[label] = {"error": "group_not_set"}
+            results[f"{origin}-{dest}"] = {"error": "group_not_set"}
+
+    if not active_routes:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = results
+        return
+
+    route_total = len(active_routes)
+
+    def progress_cb(route_idx, route_total_, day, total, status):
+        origin, dest, _ = active_routes[route_idx - 1]
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = {
+                "route": f"{origin}-{dest}", "route_num": route_idx, "route_total": route_total,
+                "day": day, "total": total, "last_status": status,
+            }
+
+    session_died = False
+    try:
+        route_pairs = [(o, d) for o, d, _ in active_routes]
+        # manual_markup=0: the automatic AirIQ+500/MarketPlace+0 rule in
+        # pricing.pick_fare is what the WhatsApp button's markup now is -
+        # no separate flat add-on on top (see plan for why).
+        raw_by_route = airiq_client.scrape_multiple_routes(route_pairs, dates, progress_cb=progress_cb)
+    except RuntimeError as e:
+        if str(e) != "not_logged_in":
+            with _jobs_lock:
+                _jobs[job_id]["status"] = "error"
+                _jobs[job_id]["error"] = str(e)
+                _jobs[job_id]["result"] = results
+            return
+        # Session died mid-run - keep whatever routes completed before
+        # that instead of discarding the whole job.
+        raw_by_route = getattr(e, "partial_results", {})
+        session_died = True
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+            _jobs[job_id]["result"] = results
+        return
+
+    # Build every poster first, send them all only once every route is
+    # ready - so the messages land in their groups back-to-back rather
+    # than trickling out as each one individually finishes building.
+    posters = {}
+    for origin, dest, group_id in active_routes:
+        label = f"{origin}-{dest}"
+        raw = raw_by_route.get((origin, dest))
+        if raw is None:
+            results[label] = {"error": "not_logged_in" if session_died else "not_scraped"}
             continue
         try:
-            # manual_markup=0: the automatic AirIQ+500/MarketPlace+0 rule in
-            # pricing.pick_fare is what the WhatsApp button's markup now is -
-            # no separate flat add-on on top (see plan for why).
-            priced_days = _scrape_and_price(origin, dest, dates, 0, progress_cb(label, idx))
-            png_bytes = poster.build(origin, dest, dates, priced_days, theme, show_logo=True)
+            priced_days = _price_scraped(raw, dates, 0)
+            posters[label] = (group_id, poster.build(origin, dest, dates, priced_days, theme, show_logo=True))
+        except Exception as e:
+            results[label] = {"error": str(e)}
 
+    for label, (group_id, png_bytes) in posters.items():
+        try:
             resp = requests.post(
                 f"{WHATSAPP_SIDECAR_URL}/send",
                 headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
@@ -131,18 +183,15 @@ def _run_whatsapp_job(job_id, theme):
                 raise RuntimeError(f"whatsapp_send_failed: {resp.status_code} {resp.text}")
 
             results[label] = {"sent": True}
-        except RuntimeError as e:
-            if str(e) == "not_logged_in":
-                # AirIQ session died mid-run - no point trying the remaining
-                # routes, they'll all fail the same way.
-                with _jobs_lock:
-                    _jobs[job_id]["status"] = "error"
-                    _jobs[job_id]["error"] = "not_logged_in"
-                    _jobs[job_id]["result"] = results
-                return
-            results[label] = {"error": str(e)}
         except Exception as e:
             results[label] = {"error": str(e)}
+
+    if session_died:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = "not_logged_in"
+            _jobs[job_id]["result"] = results
+        return
 
     with _jobs_lock:
         _jobs[job_id]["status"] = "done"

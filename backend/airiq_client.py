@@ -37,7 +37,19 @@ def has_session():
 
 
 def _new_context(p, headless=True):
-    browser = p.chromium.launch(headless=headless)
+    # Flags trim Chromium's baseline memory footprint - relevant on
+    # Render's free tier (512MB total), where an "Instance failed" crash
+    # was confirmed to coincide with heavy scrape + WhatsApp activity.
+    browser = p.chromium.launch(headless=headless, args=[
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--js-flags=--max-old-space-size=128",
+    ])
     ctx = browser.new_context(storage_state=AUTH_STATE_PATH if has_session() else None)
     return browser, ctx
 
@@ -325,6 +337,57 @@ def _reload_search_form(page, origin, dest):
         page.select_option("#to_cmd", dest)
 
 
+def _select_route(page, origin, dest):
+    page.goto(SEARCH_URL, wait_until="load")
+    page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
+
+    if "Search" not in page.title():
+        raise RuntimeError("not_logged_in")
+
+    with page.expect_navigation(wait_until="load", timeout=30000):
+        page.select_option("#dest_cmd", origin)
+    page.wait_for_selector("#to_cmd option", state="attached", timeout=15000)
+    with page.expect_navigation(wait_until="load", timeout=30000):
+        page.select_option("#to_cmd", dest)
+
+
+def _scrape_dates_on_page(page, origin, dest, dates, progress_cb=None):
+    """Assumes `page` already has `origin`/`dest` selected on the search
+    form. Scrapes each date, returns
+    {date.isoformat(): {"airiq": [...], "marketplace": [...]}}."""
+    total = len(dates)
+    results = {}
+
+    for idx, d in enumerate(dates, start=1):
+        key = d.isoformat()
+        airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+
+        # Confirmed live: the exact same date, same code, flips between
+        # having and not having fares across separate runs - genuine
+        # transient flakiness on AirIQ's side, not a deterministic
+        # failure. A couple of quick extra looks (same fast timeouts,
+        # no long wait) improve the odds without the multi-minute
+        # slowdown the longer-wait approach cost.
+        retries = 0
+        while status == "sold_out" and retries < 2:
+            page.wait_for_timeout(500)
+            airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+            retries += 1
+
+        if status == "sold_out":
+            # Still nothing after two cheap in-place retries - try a
+            # different theory: a fully fresh page load rather than
+            # continuing in the same session.
+            _reload_search_form(page, origin, dest)
+            airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+
+        results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
+        if progress_cb:
+            progress_cb(idx, total, status)
+
+    return results
+
+
 def scrape_range(origin, dest, dates, progress_cb=None):
     """dates: list of datetime.date, in the order to scrape.
 
@@ -333,52 +396,60 @@ def scrape_range(origin, dest, dates, progress_cb=None):
     if not has_session():
         raise RuntimeError("not_logged_in")
 
-    total = len(dates)
-    results = {}
+    with sync_playwright() as p:
+        browser, ctx = _new_context(p)
+        page = ctx.new_page()
+        try:
+            _select_route(page, origin, dest)
+        except RuntimeError:
+            browser.close()
+            raise
+        results = _scrape_dates_on_page(page, origin, dest, dates, progress_cb)
+        browser.close()
+
+    return results
+
+
+def scrape_multiple_routes(routes, dates, progress_cb=None):
+    """routes: list of (origin, dest) tuples. Scrapes all of them using a
+    SINGLE shared browser instead of launching a separate Chromium process
+    per route - launching 3 Chromium instances back-to-back in one job is
+    the most likely cause of a confirmed Render free-tier OOM crash
+    (Render's "Instance failed" event lined up with a WhatsApp 3-route
+    send). One browser, reused across routes, keeps peak memory down to
+    roughly one route's worth instead of stacking multiple.
+
+    progress_cb(route_idx, route_total, day_idx, day_total, status)
+
+    Returns {(origin, dest): {date.isoformat(): {...}}}. If the AirIQ
+    session dies partway through, raises RuntimeError("not_logged_in")
+    with a `.partial_results` attribute holding whatever routes completed
+    before that, so the caller doesn't lose already-scraped routes."""
+    if not has_session():
+        raise RuntimeError("not_logged_in")
+
+    all_results = {}
+    route_total = len(routes)
 
     with sync_playwright() as p:
         browser, ctx = _new_context(p)
         page = ctx.new_page()
-        page.goto(SEARCH_URL, wait_until="load")
-        page.wait_for_selector("#dest_cmd option", state="attached", timeout=15000)
 
-        if "Search" not in page.title():
-            browser.close()
-            raise RuntimeError("not_logged_in")
+        for route_idx, (origin, dest) in enumerate(routes, start=1):
+            try:
+                _select_route(page, origin, dest)
+            except RuntimeError:
+                browser.close()
+                err = RuntimeError("not_logged_in")
+                err.partial_results = all_results
+                raise err
 
-        with page.expect_navigation(wait_until="load", timeout=30000):
-            page.select_option("#dest_cmd", origin)
-        page.wait_for_selector("#to_cmd option", state="attached", timeout=15000)
-        with page.expect_navigation(wait_until="load", timeout=30000):
-            page.select_option("#to_cmd", dest)
+            def _cb(day_idx, day_total, status, _origin=origin, _dest=dest, _ridx=route_idx):
+                if progress_cb:
+                    progress_cb(_ridx, route_total, day_idx, day_total, status)
 
-        for idx, d in enumerate(dates, start=1):
-            key = d.isoformat()
-            airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
-
-            # Confirmed live: the exact same date, same code, flips between
-            # having and not having fares across separate runs - genuine
-            # transient flakiness on AirIQ's side, not a deterministic
-            # failure. A couple of quick extra looks (same fast timeouts,
-            # no long wait) improve the odds without the multi-minute
-            # slowdown the longer-wait approach cost.
-            retries = 0
-            while status == "sold_out" and retries < 2:
-                page.wait_for_timeout(500)
-                airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
-                retries += 1
-
-            if status == "sold_out":
-                # Still nothing after two cheap in-place retries - try a
-                # different theory: a fully fresh page load rather than
-                # continuing in the same session.
-                _reload_search_form(page, origin, dest)
-                airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
-
-            results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
-            if progress_cb:
-                progress_cb(idx, total, status)
+            all_results[(origin, dest)] = _scrape_dates_on_page(page, origin, dest, dates, _cb)
 
         browser.close()
 
-    return results
+    return all_results
