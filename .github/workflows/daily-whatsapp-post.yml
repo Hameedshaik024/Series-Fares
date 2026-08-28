@@ -44,7 +44,7 @@ jobs:
           fi
 
           echo "Polling job $JOB_ID..."
-          for i in $(seq 1 90); do
+          for i in $(seq 1 180); do
             sleep 10
             STATUS_RESP=$(curl -sf --max-time 30 "$BASE/api/generate/status/$JOB_ID" -H "$AUTH")
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
@@ -61,5 +61,11 @@ jobs:
             fi
           done
 
-          echo "Timed out after 15 minutes waiting for the job to finish"
+          # Confirmed live: a 15-minute window was too short for a
+          # genuinely slow run (3 routes x 30 dates with retries, on
+          # Render's shared free-tier CPU) - the job had actually
+          # completed and sent the posters, just after GitHub gave up
+          # watching. 30 minutes gives real breathing room before this
+          # workflow reports a failure that isn't one.
+          echo "Timed out after 30 minutes waiting for the job to finish"
           exit 1
