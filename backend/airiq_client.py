@@ -377,9 +377,15 @@ def _scrape_dates_on_page(page, origin, dest, dates, progress_cb=None):
         if status == "sold_out":
             # Still nothing after two cheap in-place retries - try a
             # different theory: a fully fresh page load rather than
-            # continuing in the same session.
-            _reload_search_form(page, origin, dest)
-            airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+            # continuing in the same session. If even the reload itself
+            # times out (confirmed live: a plain page.goto to AirIQ can
+            # hit a 30s navigation timeout), that's just this one date
+            # not recovering - not worth taking the whole scrape down for.
+            try:
+                _reload_search_form(page, origin, dest)
+                airiq_flights, marketplace_flights, status = _fetch_one_date(page, d)
+            except Exception:
+                pass
 
         results[key] = {"airiq": airiq_flights, "marketplace": marketplace_flights}
         if progress_cb:
@@ -421,10 +427,13 @@ def scrape_multiple_routes(routes, dates, progress_cb=None):
 
     progress_cb(route_idx, route_total, day_idx, day_total, status)
 
-    Returns {(origin, dest): {date.isoformat(): {...}}}. If the AirIQ
-    session dies partway through, raises RuntimeError("not_logged_in")
-    with a `.partial_results` attribute holding whatever routes completed
-    before that, so the caller doesn't lose already-scraped routes."""
+    Returns {(origin, dest): {date.isoformat(): {...}}} - a route that
+    failed to scrape at all (session died, or a transient failure that
+    didn't recover even after a retry) is simply absent from the dict,
+    the caller decides how to treat that. If the AirIQ session dies
+    partway through, raises RuntimeError("not_logged_in") with a
+    `.partial_results` attribute holding whatever routes completed before
+    that, so the caller doesn't lose already-scraped routes."""
     if not has_session():
         raise RuntimeError("not_logged_in")
 
@@ -436,19 +445,43 @@ def scrape_multiple_routes(routes, dates, progress_cb=None):
         page = ctx.new_page()
 
         for route_idx, (origin, dest) in enumerate(routes, start=1):
-            try:
-                _select_route(page, origin, dest)
-            except RuntimeError:
-                browser.close()
-                err = RuntimeError("not_logged_in")
-                err.partial_results = all_results
-                raise err
+            selected = False
+            for attempt in range(2):
+                try:
+                    _select_route(page, origin, dest)
+                    selected = True
+                    break
+                except RuntimeError:
+                    # Confirmed not_logged_in (bad page title) - every
+                    # remaining route would fail identically, so stop here
+                    # rather than burning more time, but keep whatever
+                    # earlier routes already completed.
+                    browser.close()
+                    err = RuntimeError("not_logged_in")
+                    err.partial_results = all_results
+                    raise err
+                except Exception:
+                    # Some other failure selecting this route (confirmed
+                    # live: a plain page.goto navigation timeout to
+                    # AirIQ) - not a "session is dead" signal, just this
+                    # one route having a bad moment. One retry, then give
+                    # up on just this route so the rest of the job isn't
+                    # sunk by it.
+                    if attempt == 0:
+                        continue
+            if not selected:
+                continue
 
             def _cb(day_idx, day_total, status, _origin=origin, _dest=dest, _ridx=route_idx):
                 if progress_cb:
                     progress_cb(_ridx, route_total, day_idx, day_total, status)
 
-            all_results[(origin, dest)] = _scrape_dates_on_page(page, origin, dest, dates, _cb)
+            try:
+                all_results[(origin, dest)] = _scrape_dates_on_page(page, origin, dest, dates, _cb)
+            except Exception:
+                # Same reasoning as above - a mid-scrape failure on this
+                # route shouldn't take down routes that haven't run yet.
+                continue
 
         browser.close()
 
