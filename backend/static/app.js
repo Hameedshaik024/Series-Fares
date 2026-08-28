@@ -353,6 +353,7 @@ $("sendWaBtn").addEventListener("click", async () => {
       const lines = Object.entries(data.result || {}).map(([route, r]) => {
         if (r.sent) return `✅ ${route}: sent`;
         if (r.error === "group_not_set") return `⚪ ${route}: skipped (no group ID set)`;
+        if (r.error === "too_few_fares") return `⚪ ${route}: skipped (only ${r.fare_days} date${r.fare_days === 1 ? "" : "s"} with fares, need 5+)`;
         return `❌ ${route}: ${r.error}`;
       });
       const anySent = Object.values(data.result || {}).some((r) => r.sent);

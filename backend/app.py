@@ -29,6 +29,12 @@ WHATSAPP_ROUTES = [
     ("HYD", "MCT", os.environ.get("WHATSAPP_GROUP_ID_HYD_MCT", "")),
 ]
 
+# A route with fares on fewer than this many of the 30 dates isn't worth
+# posting - e.g. a route with almost no current service. That route's
+# poster is skipped entirely for this run (not generated, not sent); the
+# other routes still go out normally.
+WHATSAPP_MIN_FARE_DAYS = 5
+
 # In-memory job store for /api/generate. A "Generate" call scrapes a whole
 # month day-by-day (AirIQ has no bulk endpoint), which reliably takes
 # longer than any HTTP/proxy timeout on slow free-tier hardware. So the
@@ -166,6 +172,12 @@ def _run_whatsapp_job(job_id, theme):
             continue
         try:
             priced_days = _price_scraped(raw, dates, 0)
+            if len(priced_days) < WHATSAPP_MIN_FARE_DAYS:
+                # Too thin a month to be worth posting - e.g. a route that
+                # genuinely has almost no service right now (confirmed live:
+                # HYD-RUH with zero fares, HYD-MCT with just one).
+                results[label] = {"error": "too_few_fares", "fare_days": len(priced_days)}
+                continue
             posters[label] = (group_id, poster.build(origin, dest, dates, priced_days, theme, show_logo=True))
         except Exception as e:
             results[label] = {"error": str(e)}
