@@ -1,0 +1,28 @@
+name: Daily WhatsApp fare post
+
+# Triggers the app's existing /api/whatsapp/send-monthly endpoint once a
+# day - it does the actual work (scrape all 3 routes, build posters, send
+# to each WhatsApp group). This workflow is just the alarm clock.
+#
+# 08:00 IST = 02:30 UTC. GitHub Actions cron is UTC only.
+#
+# Requires a repo secret APP_PASSWORD matching the Render service's
+# APP_PASSWORD env var (Settings -> Secrets and variables -> Actions ->
+# New repository secret). Also requires the Render app to actually be
+# awake and logged in at trigger time - see DEPLOY.md for the UptimeRobot
+# keep-alive setup this depends on.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab, for testing
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call send-monthly
+        run: |
+          curl -sf --max-time 120 --retry 2 --retry-delay 15 \
+            -X POST "https://series-fares.onrender.com/api/whatsapp/send-monthly" \
+            -H "Authorization: Bearer ${{ secrets.APP_PASSWORD }}"

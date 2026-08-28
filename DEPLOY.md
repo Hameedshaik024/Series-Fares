@@ -54,6 +54,41 @@ want to split it out to Netlify later — it's not used in this setup.)
      Like the AirIQ session, the link is lost on every redeploy/restart
      and needs re-scanning.
 
+## Daily automatic post at 8:00 AM IST
+
+`.github/workflows/daily-whatsapp-post.yml` calls the app's own
+`/api/whatsapp/send-monthly` endpoint once a day (02:30 UTC = 08:00 IST) -
+it's just the alarm clock, the endpoint does the real work exactly like
+clicking the button yourself.
+
+Two things are required for this to actually work every morning, not just
+sometimes:
+
+1. **A GitHub Actions secret** named `APP_PASSWORD`, set to the same
+   value as the Render env var of the same name: repo → **Settings** →
+   **Secrets and variables** → **Actions** → **New repository secret**.
+   (You can test the workflow immediately without waiting for 8 AM: repo →
+   **Actions** tab → "Daily WhatsApp fare post" → **Run workflow**.)
+2. **Keep the Render service from spinning down overnight**, since the
+   AirIQ session and WhatsApp link live on that container's disk and are
+   wiped by a restart (idle spin-down counts as a restart). The free,
+   no-code-change way to do this: sign up at
+   [uptimerobot.com](https://uptimerobot.com) (free tier) and add an HTTP(s)
+   monitor hitting `https://series-fares.onrender.com/api/health` every 5
+   minutes. As long as something's pinging it, Render's free tier never
+   sees the 15 minutes of inactivity that triggers a spin-down, so the
+   same container - and whatever's logged into AirIQ/WhatsApp on it -
+   keeps running.
+
+**What this doesn't fix**: the free tier's 512MB memory ceiling (a crash
+there still wipes the session same as a restart would), and AirIQ's own
+session eventually expiring on its own schedule, which we don't know the
+length of. Either one means that morning's automatic run fails with
+"session expired" and needs a human to do the OTP relogin (or WhatsApp
+re-scan) before the next day's run can succeed - this can't be automated
+away, since OTP entry needs a person to relay a live code. Worth
+occasionally checking that the app is still logged in.
+
 ## Running locally first (recommended before deploying)
 
 ```bash
