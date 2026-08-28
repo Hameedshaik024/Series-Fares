@@ -21,8 +21,45 @@ jobs:
   post:
     runs-on: ubuntu-latest
     steps:
-      - name: Call send-monthly
+      - name: Trigger send-monthly and wait for it to actually finish
         run: |
-          curl -sf --max-time 120 --retry 2 --retry-delay 15 \
-            -X POST "https://series-fares.onrender.com/api/whatsapp/send-monthly" \
-            -H "Authorization: Bearer ${{ secrets.APP_PASSWORD }}"
+          set -e
+          BASE="https://series-fares.onrender.com"
+          AUTH="Authorization: Bearer ${{ secrets.APP_PASSWORD }}"
+
+          # /api/whatsapp/send-monthly starts a background job and returns
+          # immediately (so a slow scrape can't time out the HTTP request) -
+          # a bare curl call "succeeding" here only means the job *started*,
+          # not that it finished or worked. Poll the status endpoint until
+          # it's actually done, and fail this step for real if the job
+          # errors, instead of declaring success the instant it starts.
+          echo "Starting the WhatsApp send job..."
+          START_RESP=$(curl -sf --max-time 120 --retry 2 --retry-delay 15 \
+            -X POST "$BASE/api/whatsapp/send-monthly" -H "$AUTH")
+          echo "$START_RESP"
+          JOB_ID=$(echo "$START_RESP" | jq -r '.job_id')
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "No job_id in response - aborting"
+            exit 1
+          fi
+
+          echo "Polling job $JOB_ID..."
+          for i in $(seq 1 90); do
+            sleep 10
+            STATUS_RESP=$(curl -sf --max-time 30 "$BASE/api/generate/status/$JOB_ID" -H "$AUTH")
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
+            echo "[$i] status: $STATUS"
+            if [ "$STATUS" = "done" ]; then
+              echo "Result:"
+              echo "$STATUS_RESP" | jq '.result'
+              exit 0
+            fi
+            if [ "$STATUS" = "error" ]; then
+              echo "Job failed:"
+              echo "$STATUS_RESP" | jq '.'
+              exit 1
+            fi
+          done
+
+          echo "Timed out after 15 minutes waiting for the job to finish"
+          exit 1
