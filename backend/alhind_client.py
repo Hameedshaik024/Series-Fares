@@ -372,16 +372,33 @@ def login_verify(otp):
         if login_field.count() > 0:
             username = _pending_login.get("username")
             password = _pending_login.get("password")
-            login_field.fill(username)
-            page.fill("input[placeholder='Password']", password)
-            _click_login_button(page)
-            for i in range(16):
-                page.wait_for_timeout(500)
+            # Confirmed live: even with nudge-retries, this follow-up
+            # login can still fail to take effect within one attempt -
+            # same flaky-click issue, just needing more persistence than
+            # a same-page re-click gives it. A full reload resets
+            # whatever state the stuck click left behind, giving each
+            # attempt a genuinely fresh shot rather than repeatedly
+            # clicking on a page that might be stuck.
+            for full_attempt in range(3):
                 login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
                 if login_field.count() == 0:
                     break
-                if i in (5, 10):
-                    _click_login_button(page)
+                login_field.fill(username)
+                page.fill("input[placeholder='Password']", password)
+                _click_login_button(page)
+                for i in range(16):
+                    page.wait_for_timeout(500)
+                    login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+                    if login_field.count() == 0:
+                        break
+                    if i in (5, 10):
+                        _click_login_button(page)
+                if login_field.count() == 0:
+                    break
+                if full_attempt < 2:
+                    page.reload(wait_until="networkidle", timeout=45000)
+                    page.wait_for_timeout(1500)
+                    _dismiss_alert(page)
             ok = login_field.count() == 0
 
         if not ok:
