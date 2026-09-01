@@ -166,9 +166,22 @@ def login_start(username, password):
         p = sync_playwright().start()
         browser, ctx = _new_context(p, headless=True, fresh=True)
         page = ctx.new_page()
+
+        # Confirmed live: the page loads with an empty body and a generic
+        # title ("Dhanhind" - the underlying booking-engine vendor, not
+        # Alhind's own branded title) - the Angular app itself never
+        # actually renders. Capturing console/page errors and failed
+        # requests to find out why, rather than guessing further.
+        console_msgs = []
+        page.on("console", lambda m: console_msgs.append(f"{m.type}: {m.text}"))
+        page.on("pageerror", lambda e: console_msgs.append(f"pageerror: {e}"))
+        page.on("requestfailed", lambda r: console_msgs.append(f"requestfailed: {r.url} - {r.failure}"))
+
         page.goto(HOME_URL, wait_until="networkidle", timeout=45000)
         page.wait_for_timeout(1000)
         _dismiss_alert(page)
+        if not page.inner_text("body").strip():
+            print(f"[alhind_client] login_start: empty body - console/errors: {console_msgs[:20]}", flush=True)
 
         # Confirmed live (twice, across two different fixes) that this
         # branch is firing when it shouldn't - a fresh, cookie-less
