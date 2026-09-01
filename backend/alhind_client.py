@@ -237,32 +237,41 @@ def login_start(username, password):
         if not page.inner_text("body").strip():
             print(f"[alhind_client] login_start: empty body - console/errors: {console_msgs[:20]}", flush=True)
 
-        # Confirmed live (three times now, across different fixes) that a
-        # genuinely fresh, cookie-less context can still land somewhere
-        # other than TLogin on the first load - given fresh=True guarantees
-        # there are no cookies, there is no legitimate way this session is
-        # "already logged in", so this is always a transient load issue,
-        # never a real shortcut to take. One reload, then treat it as a
-        # real, loud error instead of silently skipping the OTP flow -
-        # that silent skip is what caused every previous "OTP never
-        # asked" report.
-        if "TLogin" not in page.url:
+        # Confirmed live: the URL is not a reliable signal of auth state
+        # at all - Alhind's app renders "#/Home/Air" regardless of
+        # whether the session is actually authenticated (it apparently
+        # only redirects to the login route on a failed API call, not on
+        # a plain page load), so every previous check based on "TLogin in
+        # page.url" was fundamentally checking the wrong thing. Checking
+        # for the actual login form field instead - that's genuinely
+        # only present when a login is actually needed.
+        login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+        if login_field.count() == 0:
             page.reload(wait_until="networkidle", timeout=45000)
             page.wait_for_timeout(1000)
             _dismiss_alert(page)
+            login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
 
-        if "TLogin" not in page.url:
+        if login_field.count() == 0:
+            # No login field even after a reload. If the actual search
+            # form is showing, this genuinely is already logged in and
+            # usable; otherwise something's actually broken.
+            if page.locator(".cityName").count() > 0:
+                ctx.storage_state(path=AUTH_STATE_PATH)
+                browser.close()
+                p.stop()
+                return {"status": "already_logged_in"}
             try:
                 body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
             except Exception as e:
                 body_snippet = f"(couldn't read body: {e})"
-            print(f"[alhind_client] login_start: still not on TLogin after reload - "
+            print(f"[alhind_client] login_start: no login field and no search form - "
                   f"url={page.url!r} title={page.title()!r} body_start={body_snippet!r}", flush=True)
             browser.close()
             p.stop()
-            raise RuntimeError(f"Could not reach the Alhind login page (url={page.url})")
+            raise RuntimeError(f"Could not find the Alhind login form (url={page.url})")
 
-        page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+        login_field.fill(username)
         page.fill("input[placeholder='Password']", password)
         _click_login_button(page)
         # Confirmed live: the LOGIN click itself is genuinely flaky - the
@@ -340,20 +349,26 @@ def login_verify(otp):
         # to settle, same as the other login steps.
         page.wait_for_timeout(5000)
 
+        # Confirmed live: page.url isn't a reliable "still on the login
+        # form" signal - Alhind's app doesn't consistently redirect to a
+        # distinct login URL. Checking for the actual login field's
+        # presence instead, same fix as login_start().
         ok = True
-        if "TLogin" in page.url:
+        login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+        if login_field.count() > 0:
             username = _pending_login.get("username")
             password = _pending_login.get("password")
-            page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+            login_field.fill(username)
             page.fill("input[placeholder='Password']", password)
             _click_login_button(page)
             for i in range(16):
                 page.wait_for_timeout(500)
-                if "TLogin" not in page.url:
+                login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+                if login_field.count() == 0:
                     break
                 if i in (5, 10):
                     _click_login_button(page)
-            ok = "TLogin" not in page.url
+            ok = login_field.count() == 0
 
         if ok:
             ctx.storage_state(path=AUTH_STATE_PATH)
@@ -550,10 +565,11 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
     for a second date without navigating back first fails every time with
     a ".cityName" timeout that looks identical to a session-expiry
     failure. Landing on the search form also doubles as the session-expiry
-    check (a dead session redirects to TLogin instead), so this function
-    transparently relogs in (no OTP needed) rather than treating that as
-    fatal - confirmed live that Alhind's session token expires faster
-    than AirIQ's, well within a 30-date scrape."""
+    check (a dead session shows the login form's own input field again -
+    the URL itself doesn't reliably change, confirmed live), so this
+    function transparently relogs in (no OTP needed) rather than treating
+    that as fatal - confirmed live that Alhind's session token expires
+    faster than AirIQ's, well within a 30-date scrape."""
     # Confirmed live: the results page never changes the URL away from
     # "#/Home/Air" (same hash as the search form itself) - goto() to an
     # identical URL is a browser no-op, it does NOT re-trigger Angular's
@@ -566,8 +582,13 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
         page.goto(HOME_URL, wait_until="load", timeout=30000)
     page.wait_for_timeout(1000)
     _dismiss_alert(page)
-    if "TLogin" in page.url:
-        page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+    # Confirmed live: page.url isn't a reliable "session is dead" signal -
+    # Alhind's app doesn't consistently redirect to a distinct login URL
+    # even when logged out. Checking for the actual login field's
+    # presence instead, same fix as login_start()/login_verify().
+    login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+    if login_field.count() > 0:
+        login_field.fill(username)
         page.fill("input[placeholder='Password']", password)
         _click_login_button(page)
         # Poll rather than a fixed sleep - confirmed live (twice) that
@@ -580,11 +601,12 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
         # this re-clicks partway through rather than trusting one click.
         for i in range(16):
             page.wait_for_timeout(500)
-            if "TLogin" not in page.url:
+            login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+            if login_field.count() == 0:
                 break
             if i in (5, 10):
                 _click_login_button(page)
-        if "TLogin" in page.url:
+        if login_field.count() > 0:
             raise RuntimeError("not_registered")
         ctx.storage_state(path=AUTH_STATE_PATH)
 
