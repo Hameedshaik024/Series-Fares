@@ -17,6 +17,8 @@ want to split it out to Netlify later — it's not used in this setup.)
 3. Set these environment variables (Settings → Environment):
    - `AIRIQ_USER` — your AirIQ login username
    - `AIRIQ_PASS` — your AirIQ login password
+   - `ALHIND_USER`, `ALHIND_PASS` — your Alhind (travel.alhind.com) login,
+     used for the named-flight/fare-class posters (see below)
    - `APP_PASSWORD` — a long random string; this is the password the app
      will ask for on the login screen
    - `WHATSAPP_SHARED_SECRET` — a long random string (internal only, see
@@ -88,6 +90,50 @@ length of. Either one means that morning's automatic run fails with
 re-scan) before the next day's run can succeed - this can't be automated
 away, since OTP entry needs a person to relay a live code. Worth
 occasionally checking that the app is still logged in.
+
+## Named-flight posters (Alhind) - specific flight + fare-class, not "cheapest"
+
+A second, independent poster pipeline sourced from Alhind
+(`backend/alhind_client.py`, `backend/named_flights.py`) for cases where
+you want a poster for one *specific* flight number and fare class (e.g.
+"IndiGo 6E 1273, Tactical fare") rather than AirIQ's "whatever's
+cheapest that day" rule. Each named-flight group (currently just
+`"muscat"`) is a list of routes in `named_flights.py`; running it builds
+one poster per route, bundles them into a single PDF, and sends that PDF
+to the group's WhatsApp group.
+
+**One-time setup per container** (same ephemeral-disk caveat as AirIQ -
+needed again after every redeploy/restart):
+1. Log in via `POST /api/alhind/login/start` then `/api/alhind/login/verify`
+   with the OTP (same two-step flow as AirIQ's login panel, just a
+   separate endpoint - there's no UI button for this yet, so it needs a
+   raw API call, e.g. from the browser's dev console or curl, using your
+   `APP_PASSWORD` as the Bearer token).
+2. After that, Alhind's session auto-relogs in with no OTP for every
+   subsequent run - confirmed live this is genuinely different from
+   AirIQ (which needs a fresh human-relayed OTP every time the session
+   dies), though the session token itself expires faster, which is why
+   every search transparently relogs in rather than assuming one login
+   lasts the whole scrape.
+
+**Trigger a run**: `POST /api/whatsapp/send-named-flights` with JSON body
+`{"group": "muscat"}` (same async job pattern as the other WhatsApp
+button - poll `/api/generate/status/<job_id>`). No UI button for this yet
+either.
+
+**Expect this to take a while**: unlike AirIQ (30 days in ~3 minutes),
+each Alhind search takes ~20-50 seconds (its site has no "skip the
+second check" shortcut and a faster-expiring session needing more
+relogins), so a 6-route group scanning 30 days each can realistically
+take 60-90+ minutes total. Size any external trigger's timeout/poll
+window accordingly - the GitHub Actions daily-post pattern above is a
+good reference, just with a much longer wait budget.
+
+Confirmed live and baked into the scraper: Alhind's results are flooded
+with connecting IndiGo itineraries unless the "Direct Flights" filter is
+checked, which hides other carriers (SalamAir, Oman Air, etc.) entirely,
+not just reorders them - `_ensure_direct_flight_checked()` in
+`alhind_client.py` handles this on every search.
 
 ## Running locally first (recommended before deploying)
 

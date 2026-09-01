@@ -341,3 +341,17 @@ def render_png(html, out_path=None):
 def build(origin, dest, dates, priced_days, theme="sunset", origin_label=None, dest_label=None, show_logo=True):
     html = build_html(origin, dest, dates, priced_days, theme, origin_label, dest_label, show_logo)
     return render_png(html)
+
+
+def build_pdf(png_bytes_list):
+    """Combines multiple already-rendered poster PNGs into a single
+    multi-page PDF (one page per poster) - used for the named-flight
+    Alhind posters, which are bundled per group rather than sent as
+    separate images like the AirIQ WhatsApp routes are."""
+    import io
+    from PIL import Image
+
+    images = [Image.open(io.BytesIO(b)).convert("RGB") for b in png_bytes_list]
+    out = io.BytesIO()
+    images[0].save(out, format="PDF", save_all=True, append_images=images[1:])
+    return out.getvalue()

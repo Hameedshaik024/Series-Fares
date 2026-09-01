@@ -1,0 +1,540 @@
+"""
+Alhind (travel.alhind.com) scraping client.
+
+Used for named-flight/fare-class fare lookups (e.g. "IndiGo 6E 1273,
+Tactical fare on HYD-MCT") - a different model from AirIQ's "pick the
+cheapest available" (see pricing.py). Angular Material SPA, confirmed
+live via direct exploration.
+
+Two important differences from airiq_client.py, both confirmed live:
+
+1. OTP is only required ONCE, to register the browser/device (the
+   underlying session cookies, not just the storage_state.json file).
+   After that, plain username+password login succeeds directly - no
+   human OTP relay needed for routine scraping. BUT the session token
+   itself expires faster than AirIQ's (observed within ~15-20 minutes of
+   the tab being idle, and confirmed to happen mid-scrape), so
+   _search_once() re-navigates to the search form and transparently
+   relogs in (no OTP) at the start of every single search rather than
+   treating expiry as fatal or assuming a session stays valid across
+   multiple searches in one run.
+
+2. Angular Material's overlay backdrops (dropdowns, alert dialogs, the
+   date-picker) leave a lingering transparent backdrop in the DOM that
+   silently eats the next click aimed at whatever's underneath it - a
+   plain page.click(), even with force=True, still lands on that overlay
+   (force only skips Playwright's actionability check, it doesn't change
+   what's actually at that screen position). Every click in this module
+   goes through _click_clean(), which checks what's actually under the
+   target point first and clears a stray overlay before clicking for
+   real. Confirmed this is why naive clicks kept silently doing nothing
+   during initial exploration.
+"""
+import os
+import re
+import time
+import threading
+from playwright.sync_api import sync_playwright
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.path.join(BASE_DIR, "state")
+os.makedirs(STATE_DIR, exist_ok=True)
+AUTH_STATE_PATH = os.path.join(STATE_DIR, "alhind_storage_state.json")
+
+HOME_URL = "https://travel.alhind.com/#/Home/Air"
+
+_lock = threading.Lock()
+_pending_login = {"browser": None, "playwright": None, "page": None, "context": None,
+                   "username": None, "password": None}
+
+
+def has_session():
+    return os.path.exists(AUTH_STATE_PATH)
+
+
+def _new_context(p, headless=True):
+    browser = p.chromium.launch(headless=headless, args=[
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--js-flags=--max-old-space-size=128",
+    ])
+    ctx = browser.new_context(
+        storage_state=AUTH_STATE_PATH if has_session() else None,
+        viewport={"width": 1400, "height": 900},
+    )
+    return browser, ctx
+
+
+# ---------- overlay-safe click helpers (see module docstring) ----------
+
+def _overlay_count(page):
+    return len(page.query_selector_all(".cdk-overlay-backdrop-showing"))
+
+
+def _click_field(page, locator, max_tries=2):
+    """For elements that OPEN a dropdown/menu: click, and if a stray
+    leftover overlay just ate that click (closing itself instead of
+    opening the intended menu), click again."""
+    for _ in range(max_tries):
+        locator.click(force=True)
+        page.wait_for_timeout(500)
+        if _overlay_count(page) > 0:
+            return True
+    return _overlay_count(page) > 0
+
+
+def _open_city_dropdown(page, index, max_tries=3):
+    """Clicks the FROM (index=0) or TO (index=1) city button and confirms
+    the autocomplete search box actually appeared. Confirmed live that
+    the generic overlay-count check in _click_field isn't reliable here -
+    an unrelated stray overlay elsewhere on the page can satisfy it,
+    giving a false "it opened" signal that then makes the caller try to
+    fill a search box that was never actually shown."""
+    for _ in range(max_tries):
+        page.locator(".cityName").nth(index).click(force=True)
+        page.wait_for_timeout(500)
+        try:
+            page.wait_for_selector("input[placeholder='Start typing...']", state="visible", timeout=2000)
+            return
+        except Exception:
+            continue
+    raise RuntimeError(f"Could not open the city dropdown at index {index}")
+
+
+def _click_clean(page, locator, max_tries=5):
+    """For any click: clear a stray overlay sitting on top of the target
+    point first, then click for real."""
+    for _ in range(max_tries):
+        box = locator.bounding_box()
+        if not box:
+            locator.click(force=True)
+            page.wait_for_timeout(400)
+            continue
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        cls = page.evaluate(
+            "([x,y]) => { const e = document.elementFromPoint(x,y); return e ? e.className : null; }",
+            [cx, cy],
+        )
+        if cls and "cdk-overlay-backdrop" in cls:
+            page.mouse.click(cx, cy)
+            page.wait_for_timeout(400)
+            continue
+        locator.click(force=True)
+        page.wait_for_timeout(400)
+        return True
+    return False
+
+
+def _dismiss_alert(page):
+    """Dismisses a generic "Alert" modal (Session Expired, Kindly Re-Login
+    Now, Disclaimer, etc.) if one is showing. Returns True if one was
+    dismissed."""
+    ok_btn = page.get_by_role("button", name="Ok", exact=True)
+    if ok_btn.count() > 0:
+        _click_clean(page, ok_btn.first)
+        page.wait_for_timeout(800)
+        return True
+    return False
+
+
+# ---------- Login ----------
+
+def login_start(username, password):
+    """Two-step login (start sends OTP, verify submits it), matching
+    airiq_client's shape. Only actually needed the FIRST time this
+    account is used on a fresh container - after that, has_session() is
+    True and every search function's _search_once() call handles routine
+    relogins itself, with no OTP needed."""
+    with _lock:
+        if _pending_login["browser"]:
+            _cleanup_pending_login()
+
+        p = sync_playwright().start()
+        browser, ctx = _new_context(p, headless=True)
+        page = ctx.new_page()
+        page.goto(HOME_URL, wait_until="networkidle", timeout=45000)
+        page.wait_for_timeout(1000)
+        _dismiss_alert(page)
+
+        if "TLogin" not in page.url:
+            ctx.storage_state(path=AUTH_STATE_PATH)
+            browser.close()
+            p.stop()
+            return {"status": "already_logged_in"}
+
+        page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+        page.fill("input[placeholder='Password']", password)
+        _click_clean(page, page.locator("button:has-text('LOGIN')"))
+        page.wait_for_timeout(2500)
+
+        if "Mobile OTP" not in page.inner_text("body"):
+            browser.close()
+            p.stop()
+            raise RuntimeError(f"Unexpected page after login: {page.title()}")
+
+        _pending_login.update({
+            "browser": browser, "playwright": p, "page": page, "context": ctx,
+            "username": username, "password": password,
+        })
+        return {"status": "otp_sent"}
+
+
+def login_verify(otp):
+    """Submits the OTP. Confirmed live: after OTP verification the site
+    bounces back to a plain login form ("Kindly Re-Login Now") rather
+    than going straight into the app - this does that follow-up plain
+    login automatically so the caller just sees one clean result."""
+    with _lock:
+        page = _pending_login.get("page")
+        ctx = _pending_login.get("context")
+        browser = _pending_login.get("browser")
+        if not page:
+            raise RuntimeError("No login in progress. Call login_start first.")
+
+        displayed = page.evaluate("""() => {
+            const divs = Array.from(document.querySelectorAll('div'));
+            for (const d of divs) {
+                const t = d.textContent.trim();
+                if (/^\\d{6}$/.test(t)) return t;
+            }
+            return null;
+        }""")
+        page.fill("input[placeholder='Mobile OTP']", otp)
+        if displayed:
+            page.fill("input[placeholder='Enter Above Value']", displayed)
+        _click_clean(page, page.locator("button:has-text('VERIFY OTP')"))
+        page.wait_for_timeout(3000)
+
+        ok = True
+        if "TLogin" in page.url:
+            username = _pending_login.get("username")
+            password = _pending_login.get("password")
+            page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+            page.fill("input[placeholder='Password']", password)
+            _click_clean(page, page.locator("button:has-text('LOGIN')"))
+            page.wait_for_timeout(2500)
+            ok = "TLogin" not in page.url
+
+        if ok:
+            ctx.storage_state(path=AUTH_STATE_PATH)
+
+        _cleanup_pending_login()
+        return {"status": "ok" if ok else "invalid_or_expired_otp"}
+
+
+def _cleanup_pending_login():
+    browser = _pending_login.get("browser")
+    p = _pending_login.get("playwright")
+    if browser:
+        try:
+            browser.close()
+        except Exception:
+            pass
+    if p:
+        try:
+            p.stop()
+        except Exception:
+            pass
+    _pending_login.update({"browser": None, "playwright": None, "page": None, "context": None,
+                            "username": None, "password": None})
+
+
+# ---------- Route + date selection ----------
+
+def _select_route_and_date(page, origin_search, origin_option_text, dest_search, dest_option_text, date):
+    _open_city_dropdown(page, 0)
+    page.fill("input[placeholder='Start typing...']", origin_search)
+    page.wait_for_timeout(1000)
+    page.click(f"text={origin_option_text}", force=True)
+    page.wait_for_timeout(700)
+
+    _open_city_dropdown(page, 1)
+    page.fill("input[placeholder='Start typing...']", dest_search)
+    page.wait_for_timeout(1000)
+    page.click(f"text={dest_option_text}", force=True)
+    page.wait_for_timeout(700)
+
+    # The date picker auto-opens after TO is selected, defaulted to
+    # today's month. It's a stock Angular Material calendar (unlike the
+    # rest of this app's custom widgets) - confirmed live via its DOM:
+    # reliable .mat-calendar-period-button / -next-button / -previous-button
+    # selectors, no overlay-backdrop quirk to work around here.
+    for _ in range(24):  # safety cap: 2 years
+        label_el = page.locator(".mat-calendar-period-button span[aria-hidden='true']").first
+        if label_el.count() == 0:
+            break
+        label = label_el.inner_text().strip().upper()  # e.g. "SEPT 2026"
+        target_label = date.strftime("%b %Y").upper()[:3]
+        if target_label in label and str(date.year) in label:
+            break
+        next_btn = page.locator(".mat-calendar-next-button")
+        if next_btn.get_attribute("disabled") is not None:
+            raise RuntimeError(f"Alhind's calendar has no month past {label} - can't reach {date}")
+        _click_clean(page, next_btn)
+        page.wait_for_timeout(500)
+    else:
+        raise RuntimeError(f"Could not navigate Alhind's calendar to {date}")
+
+    day_str = str(date.day)
+    _click_clean(page, page.get_by_text(day_str, exact=True).first)
+    page.wait_for_timeout(700)
+
+    _ensure_direct_flight_checked(page)
+
+
+def _ensure_direct_flight_checked(page, max_tries=5):
+    """Confirmed live and required: without this, results are flooded
+    with IndiGo multi-leg connections and the named non-IndiGo carriers
+    (SalamAir, Oman Air) the user actually asked for don't appear in the
+    list at all - not a fare-class mismatch, they're just not shown.
+    Ticking "Direct Flights" (confirmed exact label - it's plural,
+    unlike what the checkbox's own icon/tooltip suggests) surfaces them.
+
+    Uses the actual checkbox `is_checked()` state, not a generic overlay
+    heuristic - confirmed live that a naive text-label click sometimes
+    silently doesn't register (same click flakiness as everywhere else
+    on this site), so this verifies and retries rather than assuming."""
+    checkbox = page.locator("mat-checkbox:has-text('Direct Flights') input[type=checkbox]")
+    for _ in range(max_tries):
+        if checkbox.is_checked():
+            return
+        _click_clean(page, checkbox)
+        page.wait_for_timeout(500)
+    raise RuntimeError("Could not check 'Direct Flights'")
+
+
+def _extract_flights(page):
+    """Extracts every flight card on a results page, each with its full
+    list of fare-class options (e.g. Tactical/Saver/Corp for IndiGo,
+    Value/Flexi for others) - confirmed live against real HYD-MCT
+    results. Unlike AirIQ, fare "class" (bucket) is a first-class concept
+    here, shown directly per flight rather than needing a separate
+    Market Place tab."""
+    return page.evaluate("""
+() => {
+  const cards = Array.from(document.querySelectorAll('.row.pt-2.pb-1'));
+  return cards.map(card => {
+    const img = card.querySelector('img.airlogopadding');
+    const lines = card.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+    // airline name and flight number are the two lines right after the logo
+    let airline = null, flightNo = null;
+    const idx = lines.findIndex(l => /^[A-Z0-9]{1,3}\\s?\\d{2,5}$/.test(l));
+    if (idx > 0) {
+      flightNo = lines[idx];
+      airline = lines[idx - 1];
+    }
+    const timeMatches = card.innerText.match(/\\b\\d{1,2}:\\d{2}\\b/g) || [];
+    const baggageMatch = card.innerText.match(/(No Baggage|No Freebag|\\d+\\s*kg)/i);
+    const durationMatch = card.innerText.match(/\\d+\\s*Hrs?\\s*\\d*\\s*Mins?/i);
+    const stopsMatch = card.innerText.match(/Non[- ]?Stop|\\d\\s*Stop/i);
+
+    const radios = Array.from(card.querySelectorAll('mat-radio-button'));
+    const fares = radios.map(r => {
+      const spans = r.querySelectorAll('label span');
+      let type = null, price = null;
+      spans.forEach(s => {
+        const t = s.textContent.trim();
+        if (t.startsWith('\\u20b9')) price = t;
+        else if (t.length) type = t;
+      });
+      return {type, price};
+    }).filter(f => f.type && f.price);
+
+    return {
+      airline, flight_no: flightNo,
+      logo_url: img ? img.src : null,
+      dep_time: timeMatches[0] || null,
+      arr_time: timeMatches[1] || null,
+      duration: durationMatch ? durationMatch[0] : null,
+      baggage: baggageMatch ? baggageMatch[0] : null,
+      stops: stopsMatch ? stopsMatch[0] : null,
+      fares,
+    };
+  });
+}
+""")
+
+
+def _parse_price(price_str):
+    if not price_str:
+        return None
+    digits = re.sub(r"[^\d.]", "", price_str)
+    return float(digits) if digits else None
+
+
+def _normalize(text):
+    return re.sub(r"\s+", "", (text or "")).lower()
+
+
+def find_named_fare(flights, flight_no, fare_type):
+    """flights: output of _extract_flights(). Finds the flight matching
+    flight_no (e.g. "6E 1273", whitespace/case-insensitive) and returns
+    its cheapest fare option matching fare_type (e.g. "Tactical") - a
+    flight can list the same fare_type twice at different prices (seen
+    live: two "Tactical" options), so this picks the cheaper one rather
+    than assuming there's only one."""
+    target_no = _normalize(flight_no)
+    target_type = _normalize(fare_type)
+
+    for flight in flights:
+        if _normalize(flight.get("flight_no")) != target_no:
+            continue
+        matching_fares = [f for f in flight["fares"] if _normalize(f["type"]) == target_type]
+        if not matching_fares:
+            continue
+        cheapest = min(matching_fares, key=lambda f: _parse_price(f["price"]) or float("inf"))
+        return {
+            "airline": flight["airline"],
+            "flight_no": flight["flight_no"],
+            "logo_url": flight["logo_url"],
+            "dep_time": flight["dep_time"],
+            "arr_time": flight["arr_time"],
+            "duration": flight["duration"],
+            "baggage": flight["baggage"],
+            "stops": flight["stops"],
+            "fare_type": cheapest["type"],
+            "fare_inr": _parse_price(cheapest["price"]),
+        }
+    return None
+
+
+def _search_once(page, ctx, username, password, origin_search, origin_option_text,
+                  dest_search, dest_option_text, date, flight_no, fare_type):
+    """One search attempt. Returns the matched fare dict, or None if that
+    flight/fare-class genuinely isn't there this attempt (caller decides
+    whether to retry).
+
+    Always starts by navigating back to the search form - confirmed live
+    this is required, not optional: after a search, the page is on the
+    *results* page (no .cityName field there at all), so reusing the page
+    for a second date without navigating back first fails every time with
+    a ".cityName" timeout that looks identical to a session-expiry
+    failure. Landing on the search form also doubles as the session-expiry
+    check (a dead session redirects to TLogin instead), so this function
+    transparently relogs in (no OTP needed) rather than treating that as
+    fatal - confirmed live that Alhind's session token expires faster
+    than AirIQ's, well within a 30-date scrape."""
+    # Confirmed live: the results page never changes the URL away from
+    # "#/Home/Air" (same hash as the search form itself) - goto() to an
+    # identical URL is a browser no-op, it does NOT re-trigger Angular's
+    # routing or reset the view. reload() is the only reliable way back
+    # to the search form once we're past it; goto() is only meaningful
+    # for the very first navigation in a fresh page.
+    if "#/Home/Air" in page.url:
+        page.reload(wait_until="load", timeout=30000)
+    else:
+        page.goto(HOME_URL, wait_until="load", timeout=30000)
+    page.wait_for_timeout(1000)
+    _dismiss_alert(page)
+    if "TLogin" in page.url:
+        page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
+        page.fill("input[placeholder='Password']", password)
+        _click_clean(page, page.locator("button:has-text('LOGIN')"))
+        # Poll rather than a fixed sleep - confirmed live that a flat
+        # 2500ms wait sometimes wasn't enough for the redirect to
+        # complete, causing a false "not_registered" when the login
+        # would have succeeded a moment later.
+        for _ in range(10):
+            page.wait_for_timeout(500)
+            if "TLogin" not in page.url:
+                break
+        if "TLogin" in page.url:
+            raise RuntimeError("not_registered")
+        ctx.storage_state(path=AUTH_STATE_PATH)
+
+    _select_route_and_date(page, origin_search, origin_option_text,
+                            dest_search, dest_option_text, date)
+    _click_clean(page, page.locator("button:has-text('Search Flights')"))
+    page.wait_for_timeout(6000)
+    _dismiss_alert(page)  # the one-time "Disclaimer" popup
+
+    found = False
+    for _ in range(20):
+        body_text = page.inner_text("body")
+        if "Select" in body_text and re.search(r"₹[\d,]+", body_text):
+            found = True
+            break
+        page.wait_for_timeout(1500)
+
+    if not found:
+        return None
+    flights = _extract_flights(page)
+    return find_named_fare(flights, flight_no, fare_type)
+
+
+def search_named_flight_fare(username, password, origin_search, origin_option_text,
+                              dest_search, dest_option_text, date, flight_no, fare_type):
+    """One-off, single-date lookup with its own browser. For a whole
+    date range, use scrape_named_flight_range instead - it shares one
+    browser across all dates and retries transient misses, both of which
+    matter a lot at 30 dates."""
+    with sync_playwright() as p:
+        browser, ctx = _new_context(p, headless=True)
+        page = ctx.new_page()
+        result = _search_once(page, ctx, username, password, origin_search, origin_option_text,
+                               dest_search, dest_option_text, date, flight_no, fare_type)
+        browser.close()
+        return result
+
+
+def scrape_named_flight_range(username, password, origin_search, origin_option_text,
+                               dest_search, dest_option_text, dates, flight_no, fare_type,
+                               progress_cb=None):
+    """Same named-flight/fare-class lookup as search_named_flight_fare,
+    across a whole list of dates, sharing ONE browser (same memory
+    rationale as airiq_client.scrape_multiple_routes) rather than
+    launching Chromium per date.
+
+    Confirmed live that a search can transiently come back empty for a
+    date that genuinely has the flight/fare (re-running the identical
+    search recovered it) - same class of flakiness seen on AirIQ. Retries
+    once before accepting "not found" as real. Also confirmed Alhind's
+    session token expires faster than AirIQ's mid-scrape; a search that
+    unexpectedly lands back on the login page triggers one plain relogin
+    (no OTP needed) and a retry of that date, rather than failing the
+    whole run.
+
+    progress_cb(day_idx, day_total, status) - status one of "ok" /
+    "not_found" / "error".
+
+    Returns {date.isoformat(): matched_flight_dict_or_None}."""
+    results = {}
+    total = len(dates)
+
+    with sync_playwright() as p:
+        browser, ctx = _new_context(p, headless=True)
+        page = ctx.new_page()
+
+        for idx, date in enumerate(dates, start=1):
+            key = date.isoformat()
+            result = None
+            status = "not_found"
+
+            for attempt in range(2):
+                try:
+                    # _search_once always navigates back to the search
+                    # form first (and relogs in there if the session's
+                    # expired) - no separate recovery step needed here.
+                    result = _search_once(page, ctx, username, password,
+                                           origin_search, origin_option_text,
+                                           dest_search, dest_option_text, date, flight_no, fare_type)
+                    status = "ok" if result else "not_found"
+                    if result:
+                        break
+                except Exception:
+                    status = "error"
+                if attempt == 0:
+                    page.wait_for_timeout(1000)
+
+            results[key] = result
+            if progress_cb:
+                progress_cb(idx, total, status)
+
+        browser.close()
+
+    return results

@@ -9,12 +9,16 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 
 import airiq_client
+import alhind_client
 import poster
 import pricing
+import named_flights
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 AIRIQ_USER = os.environ.get("AIRIQ_USER", "")
 AIRIQ_PASS = os.environ.get("AIRIQ_PASS", "")
+ALHIND_USER = os.environ.get("ALHIND_USER", "")
+ALHIND_PASS = os.environ.get("ALHIND_PASS", "")
 
 WHATSAPP_SIDECAR_URL = os.environ.get("WHATSAPP_SIDECAR_URL", "http://127.0.0.1:3000")
 WHATSAPP_SHARED_SECRET = os.environ.get("WHATSAPP_SHARED_SECRET", "")
@@ -28,6 +32,14 @@ WHATSAPP_ROUTES = [
     ("HYD", "RUH", os.environ.get("WHATSAPP_GROUP_ID_HYD_RUH", "")),
     ("HYD", "MCT", os.environ.get("WHATSAPP_GROUP_ID_HYD_MCT", "")),
 ]
+
+# Named-flight (Alhind-sourced) groups - each is a bundle of specific
+# flight+fare-class routes (see named_flights.py) rendered into one PDF
+# and sent to the same physical WhatsApp group as its AirIQ counterpart
+# (e.g. "muscat" reuses the HYD-MCT group id - it's the same audience).
+ALHIND_GROUP_IDS = {
+    "muscat": os.environ.get("WHATSAPP_GROUP_ID_HYD_MCT", ""),
+}
 
 # A route with fares on fewer than this many of the 30 dates isn't worth
 # posting - e.g. a route with almost no current service. That route's
@@ -210,6 +222,120 @@ def _run_whatsapp_job(job_id, theme):
         _jobs[job_id]["result"] = results
 
 
+def _alhind_flight_to_poster_entry(date, match):
+    """Converts one alhind_client.find_named_fare() result into the
+    {"date", "source", "flight", "base_fare", "final_fare"} shape
+    poster.build() expects - the same shape pricing.pick_fare() produces
+    for AirIQ, so poster.py needs no changes to render these. No markup
+    is added here: these are specific named flights/fare-classes the
+    user asked for by name, not a resale-price rule like AirIQ's."""
+    flight = {
+        "airline": match.get("airline"),
+        "logo_url": match.get("logo_url"),
+        "flight_no": match.get("flight_no"),
+        "time": (f"{match['dep_time']} - {match['arr_time']}"
+                 if match.get("dep_time") and match.get("arr_time") else None),
+        "duration": match.get("duration"),
+        "stops": match.get("stops"),
+        "baggage": match.get("baggage"),
+    }
+    fare = match.get("fare_inr")
+    return {"date": date, "source": "alhind", "flight": flight, "base_fare": fare, "final_fare": fare}
+
+
+def _run_alhind_named_job(job_id, group_key, theme="sunset"):
+    """Builds one poster per route in named_flights.NAMED_FLIGHT_GROUPS
+    [group_key] - each showing a SPECIFIC named flight+fare-class across
+    the next 30 days, not the automatic "cheapest available" AirIQ uses -
+    bundles them into one PDF, and sends that PDF to the group's WhatsApp
+    group. A route with no matches at all across the whole range is
+    skipped (its poster would be nothing but blanks); routes that do
+    match still go out even if others in the group fail."""
+    routes = named_flights.NAMED_FLIGHT_GROUPS.get(group_key)
+    if not routes:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = f"unknown_group: {group_key}"
+        return
+
+    group_id = ALHIND_GROUP_IDS.get(group_key)
+    if not group_id:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = "group_not_set"
+        return
+
+    dates = _next_30_days()
+    route_total = len(routes)
+    results = {}
+    posters = []
+
+    for idx, route in enumerate(routes, start=1):
+        label = f"{route['origin_code']}-{route['dest_code']} {route['flight_no']} {route['fare_type']}"
+
+        def progress_cb(day, total, status, _idx=idx, _label=label):
+            with _jobs_lock:
+                _jobs[job_id]["progress"] = {
+                    "route": _label, "route_num": _idx, "route_total": route_total,
+                    "day": day, "total": total, "last_status": status,
+                }
+
+        try:
+            raw = alhind_client.scrape_named_flight_range(
+                username=ALHIND_USER, password=ALHIND_PASS,
+                origin_search=route["origin_search"], origin_option_text=route["origin_option"],
+                dest_search=route["dest_search"], dest_option_text=route["dest_option"],
+                dates=dates, flight_no=route["flight_no"], fare_type=route["fare_type"],
+                progress_cb=progress_cb,
+            )
+        except Exception as e:
+            results[label] = {"error": str(e)}
+            continue
+
+        priced_days = [_alhind_flight_to_poster_entry(d, raw[d.isoformat()])
+                        for d in dates if raw.get(d.isoformat())]
+        if not priced_days:
+            results[label] = {"error": "not_found_any_day"}
+            continue
+
+        try:
+            png_bytes = poster.build(route["origin_code"], route["dest_code"], dates, priced_days, theme,
+                                      origin_label=route["origin_label"], dest_label=route["dest_label"],
+                                      show_logo=True)
+            posters.append((label, png_bytes))
+            results[label] = {"sent": True, "fare_days": len(priced_days)}
+        except Exception as e:
+            results[label] = {"error": str(e)}
+
+    if not posters:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = results
+        return
+
+    try:
+        pdf_bytes = poster.build_pdf([png for _, png in posters])
+        resp = requests.post(
+            f"{WHATSAPP_SIDECAR_URL}/send-document",
+            headers={"x-internal-secret": WHATSAPP_SHARED_SECRET},
+            data={"groupId": group_id, "caption": WHATSAPP_CAPTION, "fileName": f"{group_key}-fares.pdf"},
+            files={"document": (f"{group_key}-fares.pdf", pdf_bytes, "application/pdf")},
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"whatsapp_send_failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+            _jobs[job_id]["result"] = results
+        return
+
+    with _jobs_lock:
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = results
+
+
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)  # harmless no-op now that frontend is same-origin; kept in case of a split deploy later
 
@@ -234,7 +360,11 @@ def require_auth(fn):
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "logged_in": airiq_client.has_session()})
+    return jsonify({
+        "status": "ok",
+        "logged_in": airiq_client.has_session(),
+        "alhind_logged_in": alhind_client.has_session(),
+    })
 
 
 @app.route("/api/login/start", methods=["POST"])
@@ -258,6 +388,36 @@ def login_verify():
         return jsonify({"error": "missing_otp"}), 400
     try:
         result = airiq_client.login_verify(otp)
+        status_code = 200 if result["status"] == "ok" else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"error": "verify_failed", "detail": str(e)}), 500
+
+
+@app.route("/api/alhind/login/start", methods=["POST"])
+@require_auth
+def alhind_login_start():
+    """Only needed ONCE ever per container to register the device with
+    Alhind (see alhind_client.py) - after that, scrape_named_flight_range
+    relogs in automatically with no OTP for every subsequent run."""
+    if not ALHIND_USER or not ALHIND_PASS:
+        return jsonify({"error": "server_misconfigured", "detail": "ALHIND_USER/ALHIND_PASS not set"}), 500
+    try:
+        result = alhind_client.login_start(ALHIND_USER, ALHIND_PASS)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": "login_failed", "detail": str(e)}), 500
+
+
+@app.route("/api/alhind/login/verify", methods=["POST"])
+@require_auth
+def alhind_login_verify():
+    body = request.get_json(force=True) or {}
+    otp = body.get("otp")
+    if not otp:
+        return jsonify({"error": "missing_otp"}), 400
+    try:
+        result = alhind_client.login_verify(otp)
         status_code = 200 if result["status"] == "ok" else 400
         return jsonify(result), status_code
     except Exception as e:
@@ -396,6 +556,48 @@ def whatsapp_send_monthly():
     thread = threading.Thread(
         target=_run_whatsapp_job,
         args=(job_id, "sunset"),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id}), 202
+
+
+@app.route("/api/whatsapp/send-named-flights", methods=["POST"])
+@require_auth
+def whatsapp_send_named_flights():
+    """group: which named_flights.NAMED_FLIGHT_GROUPS entry to run, e.g.
+    "muscat" - builds one poster per specific flight+fare-class in that
+    group, bundles them into a PDF, sends it to that group's WhatsApp
+    group. Alhind-sourced, independent of the AirIQ job above."""
+    _prune_old_jobs()
+    body = request.get_json(force=True) or {}
+    group_key = body.get("group")
+    if not group_key or group_key not in named_flights.NAMED_FLIGHT_GROUPS:
+        return jsonify({
+            "error": "bad_group",
+            "detail": f"group must be one of {list(named_flights.NAMED_FLIGHT_GROUPS)}",
+        }), 400
+    if not ALHIND_USER or not ALHIND_PASS:
+        return jsonify({"error": "server_misconfigured", "detail": "ALHIND_USER/ALHIND_PASS not set"}), 500
+    if not alhind_client.has_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    if not ALHIND_GROUP_IDS.get(group_key):
+        return jsonify({
+            "error": "server_misconfigured",
+            "detail": f"No WhatsApp group id set for '{group_key}'",
+        }), 500
+
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "running", "progress": None, "result": None, "error": None,
+            "created": time.time(), "kind": "whatsapp_named",
+        }
+
+    thread = threading.Thread(
+        target=_run_alhind_named_job,
+        args=(job_id, group_key, "sunset"),
         daemon=True,
     )
     thread.start()

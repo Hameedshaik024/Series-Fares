@@ -123,6 +123,27 @@ app.post("/send", requireSecret, upload.single("image"), async (req, res) => {
   }
 });
 
+app.post("/send-document", requireSecret, upload.single("document"), async (req, res) => {
+  if (!isLinked || !sock) {
+    return res.status(409).json({ error: "not_linked" });
+  }
+  const { groupId, caption, fileName } = req.body;
+  if (!groupId || !req.file) {
+    return res.status(400).json({ error: "missing_params", detail: "groupId and document are required" });
+  }
+  try {
+    await sock.sendMessage(groupId, {
+      document: req.file.buffer,
+      mimetype: req.file.mimetype || "application/pdf",
+      fileName: fileName || "fares.pdf",
+      caption: caption || "",
+    });
+    res.json({ status: "sent" });
+  } catch (e) {
+    res.status(500).json({ error: "send_failed", detail: String(e) });
+  }
+});
+
 app.listen(PORT, "127.0.0.1", () => {
   console.log(`WhatsApp sidecar listening on 127.0.0.1:${PORT}`);
 });
