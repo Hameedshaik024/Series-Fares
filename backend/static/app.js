@@ -29,7 +29,7 @@ $("gateBtn").addEventListener("click", async () => {
     const data = await res.json();
     $("gate").style.display = "none";
     $("app").style.display = "block";
-    initApp(data.logged_in);
+    initApp(data.logged_in, data.alhind_logged_in);
   } catch (e) {
     $("gateStatus").textContent = "Could not reach the server: " + e.message;
   }
@@ -37,11 +37,14 @@ $("gateBtn").addEventListener("click", async () => {
 
 // ---------- App init ----------
 
-async function initApp(loggedIn) {
+async function initApp(loggedIn, alhindLoggedIn) {
   if (!loggedIn) {
     showRelogin();
   } else {
     loadOrigins();
+  }
+  if (!alhindLoggedIn) {
+    showAlhindRelogin();
   }
 }
 
@@ -105,6 +108,49 @@ $("verifyOtpBtn").addEventListener("click", async () => {
     $("reloginStatus").textContent = "OTP invalid or expired — click Send OTP again and re-enter quickly.";
     $("reloginStep1").style.display = "block";
     $("reloginStep2").style.display = "none";
+  }
+});
+
+// ---------- Alhind re-login (OTP - one-time; auto-relogs in after) ----------
+
+function showAlhindRelogin() {
+  $("alhindReloginCard").style.display = "block";
+  $("alhindReloginStep1").style.display = "block";
+  $("alhindReloginStep2").style.display = "none";
+  $("alhindReloginStatus").textContent = "";
+}
+
+$("alhindSendOtpBtn").addEventListener("click", async () => {
+  $("alhindReloginStatus").textContent = "Sending OTP…";
+  const res = await api("/api/alhind/login/start", { method: "POST" });
+  const data = await res.json();
+  if (!res.ok) {
+    $("alhindReloginStatus").textContent = "Failed: " + (data.detail || data.error);
+    return;
+  }
+  if (data.status === "already_logged_in") {
+    $("alhindReloginStatus").textContent = "Already logged in!";
+    $("alhindReloginCard").style.display = "none";
+    return;
+  }
+  $("alhindReloginStep1").style.display = "none";
+  $("alhindReloginStep2").style.display = "block";
+  $("alhindReloginStatus").textContent = "OTP sent — enter it below quickly, it expires fast.";
+});
+
+$("alhindVerifyOtpBtn").addEventListener("click", async () => {
+  const otp = $("alhindOtpInput").value.trim();
+  if (!otp) return;
+  $("alhindReloginStatus").textContent = "Verifying…";
+  const res = await api("/api/alhind/login/verify", { method: "POST", body: JSON.stringify({ otp }) });
+  const data = await res.json();
+  if (res.ok && data.status === "ok") {
+    $("alhindReloginStatus").textContent = "Logged in! This only needed the OTP once - future runs relog in automatically.";
+    $("alhindReloginCard").style.display = "none";
+  } else {
+    $("alhindReloginStatus").textContent = "OTP invalid or expired — click Send OTP again and re-enter quickly.";
+    $("alhindReloginStep1").style.display = "block";
+    $("alhindReloginStep2").style.display = "none";
   }
 });
 
@@ -364,5 +410,89 @@ $("sendWaBtn").addEventListener("click", async () => {
     set("Error: " + e.message, "err");
   } finally {
     $("sendWaBtn").disabled = false;
+  }
+});
+
+// ---------- Named-flight posters (Alhind): one-click send ----------
+
+$("sendNamedBtn").addEventListener("click", async () => {
+  $("sendNamedBtn").disabled = true;
+  const set = (html, cls) => {
+    const el = $("namedSendStatus");
+    el.innerHTML = html;
+    el.className = cls || "";
+  };
+  const group = $("namedGroup").value;
+  set('<span class="spinner"></span> Starting…', "");
+
+  try {
+    const res = await api("/api/whatsapp/send-named-flights", {
+      method: "POST",
+      body: JSON.stringify({ group }),
+    });
+    const startData = await res.json().catch(() => ({}));
+
+    if (res.status === 401) {
+      if (startData.error === "not_logged_in") {
+        set("Alhind session expired.", "err");
+        showAlhindRelogin();
+      } else {
+        set("Wrong app password — reload and re-enter it.", "err");
+      }
+      return;
+    }
+    if (!res.ok) {
+      set("Failed: " + (startData.detail || startData.error || res.statusText), "err");
+      return;
+    }
+
+    const jobId = startData.job_id;
+    while (true) {
+      // Named-flight scans take much longer than the AirIQ routes (no
+      // "skip the second check" shortcut, and Alhind's session expires
+      // faster, needing more relogins along the way) - realistically
+      // 60-90+ minutes for a 6-route group, so this polls patiently.
+      await new Promise((r) => setTimeout(r, 3000));
+      const sres = await api(`/api/generate/status/${jobId}`);
+      let data;
+      try {
+        data = await sres.json();
+      } catch (e) {
+        set("Lost connection to the server mid-job (it may have restarted) — routes already sent went through; check WhatsApp for the rest, then try again.", "err");
+        break;
+      }
+
+      if (data.status === "running") {
+        const p = data.progress;
+        const progressText = p
+          ? `Route ${p.route_num}/${p.route_total} (${p.route}) — day ${p.day}/${p.total} (${p.last_status})`
+          : "Starting…";
+        set(`<span class="spinner"></span> ${progressText} — this can take 60-90+ minutes, please wait…`, "");
+        continue;
+      }
+      if (data.status === "error") {
+        if (data.error === "not_logged_in") {
+          set("Alhind session expired partway through and couldn't auto-relogin.", "err");
+          showAlhindRelogin();
+        } else {
+          set("Failed: " + data.error, "err");
+        }
+        break;
+      }
+
+      // done - data.result is {"HYD-MCT 6E 1273 Tactical": {sent:true, fare_days:N} | {error:...}, ...}
+      const lines = Object.entries(data.result || {}).map(([route, r]) => {
+        if (r.sent) return `✅ ${route}: sent (${r.fare_days} dates)`;
+        if (r.error === "not_found_any_day") return `⚪ ${route}: skipped (not found on any day)`;
+        return `❌ ${route}: ${r.error}`;
+      });
+      const anySent = Object.values(data.result || {}).some((r) => r.sent);
+      set(lines.join("<br>"), anySent ? "ok" : "err");
+      break;
+    }
+  } catch (e) {
+    set("Error: " + e.message, "err");
+  } finally {
+    $("sendNamedBtn").disabled = false;
   }
 });
