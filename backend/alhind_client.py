@@ -170,7 +170,17 @@ def login_start(username, password):
         page.wait_for_timeout(1000)
         _dismiss_alert(page)
 
+        # Confirmed live (twice, across two different fixes) that this
+        # branch is firing when it shouldn't - a fresh, cookie-less
+        # context still isn't landing on TLogin. Log exactly what's on
+        # the page instead of guessing again.
         if "TLogin" not in page.url:
+            try:
+                body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
+            except Exception as e:
+                body_snippet = f"(couldn't read body: {e})"
+            print(f"[alhind_client] login_start: fresh context landed on "
+                  f"url={page.url!r} title={page.title()!r} body_start={body_snippet!r}", flush=True)
             ctx.storage_state(path=AUTH_STATE_PATH)
             browser.close()
             p.stop()
