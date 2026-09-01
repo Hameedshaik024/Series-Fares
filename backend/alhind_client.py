@@ -234,8 +234,6 @@ def login_start(username, password):
         page.goto(HOME_URL, wait_until="networkidle", timeout=45000)
         page.wait_for_timeout(1000)
         _dismiss_alert(page)
-        if not page.inner_text("body").strip():
-            print(f"[alhind_client] login_start: empty body - console/errors: {console_msgs[:20]}", flush=True)
 
         # Confirmed live: the URL is not a reliable signal of auth state
         # at all - Alhind's app renders "#/Home/Air" regardless of
@@ -245,10 +243,22 @@ def login_start(username, password):
         # page.url" was fundamentally checking the wrong thing. Checking
         # for the actual login form field instead - that's genuinely
         # only present when a login is actually needed.
+        #
+        # Confirmed live: the blank-page bot-detection symptom (empty
+        # body, generic "Dhanhind" title) is itself intermittent - the
+        # stealth patches get past it on some loads and not others, same
+        # class of flakiness as everything else on this site. One reload
+        # wasn't enough; retrying the load itself up to 3 times total.
         login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
-        if login_field.count() == 0:
+        for attempt in range(3):
+            if login_field.count() > 0 or page.locator(".cityName").count() > 0:
+                break
+            if not page.inner_text("body").strip():
+                print(f"[alhind_client] login_start: empty body on attempt {attempt + 1} - "
+                      f"console/errors: {console_msgs[:20]}", flush=True)
+            console_msgs.clear()
             page.reload(wait_until="networkidle", timeout=45000)
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(1500)
             _dismiss_alert(page)
             login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
 
