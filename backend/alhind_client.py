@@ -249,15 +249,15 @@ def _cleanup_pending_login():
 def _select_route_and_date(page, origin_search, origin_option_text, dest_search, dest_option_text, date):
     _open_city_dropdown(page, 0)
     page.fill("input[placeholder='Start typing...']", origin_search)
-    page.wait_for_timeout(1000)
-    page.click(f"text={origin_option_text}", force=True)
     page.wait_for_timeout(700)
+    page.click(f"text={origin_option_text}", force=True)
+    page.wait_for_timeout(500)
 
     _open_city_dropdown(page, 1)
     page.fill("input[placeholder='Start typing...']", dest_search)
-    page.wait_for_timeout(1000)
-    page.click(f"text={dest_option_text}", force=True)
     page.wait_for_timeout(700)
+    page.click(f"text={dest_option_text}", force=True)
+    page.wait_for_timeout(500)
 
     # The date picker auto-opens after TO is selected, defaulted to
     # today's month. It's a stock Angular Material calendar (unlike the
@@ -282,7 +282,7 @@ def _select_route_and_date(page, origin_search, origin_option_text, dest_search,
 
     day_str = str(date.day)
     _click_clean(page, page.get_by_text(day_str, exact=True).first)
-    page.wait_for_timeout(700)
+    page.wait_for_timeout(500)
 
     _ensure_direct_flight_checked(page)
 
@@ -435,11 +435,13 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
         page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
         page.fill("input[placeholder='Password']", password)
         _click_clean(page, page.locator("button:has-text('LOGIN')"))
-        # Poll rather than a fixed sleep - confirmed live that a flat
-        # 2500ms wait sometimes wasn't enough for the redirect to
-        # complete, causing a false "not_registered" when the login
-        # would have succeeded a moment later.
-        for _ in range(10):
+        # Poll rather than a fixed sleep - confirmed live (twice) that
+        # even a few seconds isn't always enough for the redirect to
+        # complete, causing a false "not_registered" when the login would
+        # have succeeded a moment later. This only costs time on an
+        # actual relogin (rare relative to the per-date search budget),
+        # so it's fine to be generous here specifically.
+        for _ in range(16):
             page.wait_for_timeout(500)
             if "TLogin" not in page.url:
                 break
@@ -450,11 +452,18 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
     _select_route_and_date(page, origin_search, origin_option_text,
                             dest_search, dest_option_text, date)
     _click_clean(page, page.locator("button:has-text('Search Flights')"))
-    page.wait_for_timeout(6000)
+    # The flat 6s wait here was pure dead time before the poll loop even
+    # started checking - the loop already handles the real variance in
+    # how long results take to render, so a short buffer plus starting
+    # the poll sooner catches fast results faster without needing to
+    # trust a guessed fixed delay. Total max budget (buffer + poll) cut
+    # from 36s to ~24s - still generous versus observed real load times
+    # (7-20s), just without padding every single search with dead time.
+    page.wait_for_timeout(1500)
     _dismiss_alert(page)  # the one-time "Disclaimer" popup
 
     found = False
-    for _ in range(20):
+    for _ in range(15):
         body_text = page.inner_text("body")
         if "Select" in body_text and re.search(r"₹[\d,]+", body_text):
             found = True
