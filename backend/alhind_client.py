@@ -244,13 +244,24 @@ def login_start(username, password):
         # for the actual login form field instead - that's genuinely
         # only present when a login is actually needed.
         #
-        # Confirmed live: the blank-page bot-detection symptom (empty
-        # body, generic "Dhanhind" title) is itself intermittent - the
-        # stealth patches get past it on some loads and not others, same
-        # class of flakiness as everything else on this site. One reload
-        # wasn't enough; retrying the load itself up to 3 times total.
+        # Confirmed live: the empty-body symptom is a real render-timing
+        # race, not (or not only) bot detection - Render's logs showed a
+        # JS chunk (a lazy-loaded route module, by the filename) getting
+        # net::ERR_ABORTED immediately after a reload we triggered. That
+        # means our own retry was cancelling an in-flight chunk fetch that
+        # likely just needed more time, guaranteeing that attempt would
+        # fail. So: wait patiently (polling) for the body to actually
+        # render before ever reloading, rather than reloading eagerly
+        # after a single short, fixed wait.
         login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
         for attempt in range(3):
+            for _ in range(10):  # up to ~10s of patient polling per attempt
+                login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+                if login_field.count() > 0 or page.locator(".cityName").count() > 0:
+                    break
+                if page.inner_text("body").strip():
+                    break  # something rendered, even if not what we expect yet
+                page.wait_for_timeout(1000)
             if login_field.count() > 0 or page.locator(".cityName").count() > 0:
                 break
             if not page.inner_text("body").strip():
