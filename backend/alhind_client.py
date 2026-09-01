@@ -52,7 +52,16 @@ def has_session():
     return os.path.exists(AUTH_STATE_PATH)
 
 
-def _new_context(p, headless=True):
+def _new_context(p, headless=True, fresh=False):
+    """fresh=True skips loading any existing storage_state.json, even if
+    has_session() is True - used by login_start() so an explicit "log me
+    in" request always sees Alhind's real current state, rather than
+    trusting a saved session that might be stale. Confirmed live this
+    matters: a stale-but-existing state file (written by an earlier
+    partially-successful run) was just valid enough that Alhind didn't
+    redirect to the login page on a plain load, so login_start() wrongly
+    concluded "already_logged_in" and silently skipped the OTP flow -
+    while that same stale session then failed every actual search."""
     browser = p.chromium.launch(headless=headless, args=[
         "--disable-dev-shm-usage",
         "--disable-gpu",
@@ -64,7 +73,7 @@ def _new_context(p, headless=True):
         "--js-flags=--max-old-space-size=128",
     ])
     ctx = browser.new_context(
-        storage_state=AUTH_STATE_PATH if has_session() else None,
+        storage_state=AUTH_STATE_PATH if (has_session() and not fresh) else None,
         viewport={"width": 1400, "height": 900},
     )
     return browser, ctx
@@ -155,7 +164,7 @@ def login_start(username, password):
             _cleanup_pending_login()
 
         p = sync_playwright().start()
-        browser, ctx = _new_context(p, headless=True)
+        browser, ctx = _new_context(p, headless=True, fresh=True)
         page = ctx.new_page()
         page.goto(HOME_URL, wait_until="networkidle", timeout=45000)
         page.wait_for_timeout(1000)
