@@ -33,10 +33,22 @@ jobs:
           # not that it finished or worked. Poll the status endpoint until
           # it's actually done, and fail this step for real if the job
           # errors, instead of declaring success the instant it starts.
+          #
+          # Not using curl -f: it discards the response body on an HTTP
+          # error, which turned a real 401/500 into an opaque "exit code
+          # 22" with no way to tell what actually happened. Capturing the
+          # status code and body separately instead, so a failure here
+          # always prints the server's actual error message.
           echo "Starting the WhatsApp send job..."
-          START_RESP=$(curl -sf --max-time 120 --retry 2 --retry-delay 15 \
+          HTTP_CODE=$(curl -s --max-time 120 --retry 2 --retry-delay 15 \
+            -o /tmp/start_resp.json -w "%{http_code}" \
             -X POST "$BASE/api/whatsapp/send-monthly" -H "$AUTH")
-          echo "$START_RESP"
+          START_RESP=$(cat /tmp/start_resp.json)
+          echo "HTTP $HTTP_CODE: $START_RESP"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "send-monthly request failed (HTTP $HTTP_CODE) - see response body above"
+            exit 1
+          fi
           JOB_ID=$(echo "$START_RESP" | jq -r '.job_id')
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
             echo "No job_id in response - aborting"
@@ -46,7 +58,13 @@ jobs:
           echo "Polling job $JOB_ID..."
           for i in $(seq 1 180); do
             sleep 10
-            STATUS_RESP=$(curl -sf --max-time 30 "$BASE/api/generate/status/$JOB_ID" -H "$AUTH")
+            STATUS_HTTP_CODE=$(curl -s --max-time 30 -o /tmp/status_resp.json -w "%{http_code}" \
+              "$BASE/api/generate/status/$JOB_ID" -H "$AUTH")
+            STATUS_RESP=$(cat /tmp/status_resp.json)
+            if [ "$STATUS_HTTP_CODE" -lt 200 ] || [ "$STATUS_HTTP_CODE" -ge 300 ]; then
+              echo "[$i] status check failed (HTTP $STATUS_HTTP_CODE): $STATUS_RESP"
+              continue
+            fi
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
             echo "[$i] status: $STATUS"
             if [ "$STATUS" = "done" ]; then
