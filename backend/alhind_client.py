@@ -170,9 +170,19 @@ def login_start(username, password):
         page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
         page.fill("input[placeholder='Password']", password)
         _click_clean(page, page.locator("button:has-text('LOGIN')"))
-        page.wait_for_timeout(2500)
+        # Poll rather than a flat wait - confirmed live (same issue fixed
+        # in the routine-relogin path) that a couple of seconds isn't
+        # always enough for the OTP screen to actually render, which was
+        # raising "Unexpected page after login" and killing the whole OTP
+        # flow before it had a real chance to appear.
+        otp_screen_shown = False
+        for _ in range(16):
+            page.wait_for_timeout(500)
+            if "Mobile OTP" in page.inner_text("body"):
+                otp_screen_shown = True
+                break
 
-        if "Mobile OTP" not in page.inner_text("body"):
+        if not otp_screen_shown:
             browser.close()
             p.stop()
             raise RuntimeError(f"Unexpected page after login: {page.title()}")
@@ -208,7 +218,12 @@ def login_verify(otp):
         if displayed:
             page.fill("input[placeholder='Enter Above Value']", displayed)
         _click_clean(page, page.locator("button:has-text('VERIFY OTP')"))
-        page.wait_for_timeout(3000)
+        # Generous flat wait, not a poll: there's no single target URL to
+        # watch for here (success could land on the app itself OR bounce
+        # to the "Kindly Re-Login Now" form, both are valid outcomes
+        # checked below) - but confirmed live this step needs real time
+        # to settle, same as the other login steps.
+        page.wait_for_timeout(5000)
 
         ok = True
         if "TLogin" in page.url:
@@ -217,7 +232,10 @@ def login_verify(otp):
             page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
             page.fill("input[placeholder='Password']", password)
             _click_clean(page, page.locator("button:has-text('LOGIN')"))
-            page.wait_for_timeout(2500)
+            for _ in range(16):
+                page.wait_for_timeout(500)
+                if "TLogin" not in page.url:
+                    break
             ok = "TLogin" not in page.url
 
         if ok:
