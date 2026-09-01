@@ -237,21 +237,30 @@ def login_start(username, password):
         if not page.inner_text("body").strip():
             print(f"[alhind_client] login_start: empty body - console/errors: {console_msgs[:20]}", flush=True)
 
-        # Confirmed live (twice, across two different fixes) that this
-        # branch is firing when it shouldn't - a fresh, cookie-less
-        # context still isn't landing on TLogin. Log exactly what's on
-        # the page instead of guessing again.
+        # Confirmed live (three times now, across different fixes) that a
+        # genuinely fresh, cookie-less context can still land somewhere
+        # other than TLogin on the first load - given fresh=True guarantees
+        # there are no cookies, there is no legitimate way this session is
+        # "already logged in", so this is always a transient load issue,
+        # never a real shortcut to take. One reload, then treat it as a
+        # real, loud error instead of silently skipping the OTP flow -
+        # that silent skip is what caused every previous "OTP never
+        # asked" report.
+        if "TLogin" not in page.url:
+            page.reload(wait_until="networkidle", timeout=45000)
+            page.wait_for_timeout(1000)
+            _dismiss_alert(page)
+
         if "TLogin" not in page.url:
             try:
                 body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
             except Exception as e:
                 body_snippet = f"(couldn't read body: {e})"
-            print(f"[alhind_client] login_start: fresh context landed on "
+            print(f"[alhind_client] login_start: still not on TLogin after reload - "
                   f"url={page.url!r} title={page.title()!r} body_start={body_snippet!r}", flush=True)
-            ctx.storage_state(path=AUTH_STATE_PATH)
             browser.close()
             p.stop()
-            return {"status": "already_logged_in"}
+            raise RuntimeError(f"Could not reach the Alhind login page (url={page.url})")
 
         page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
         page.fill("input[placeholder='Password']", password)
