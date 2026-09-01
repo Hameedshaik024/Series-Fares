@@ -52,6 +52,34 @@ def has_session():
     return os.path.exists(AUTH_STATE_PATH)
 
 
+_REAL_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+)
+
+# Confirmed live: Alhind's app renders a completely empty page (no JS
+# errors, no failed requests - it just never bootstraps) for a plain
+# Playwright session, while a real browser works fine. That signature -
+# silent, no visible error - is the standard behavior of client-side
+# bot-detection scripts that check automation markers before deciding
+# whether to let the app run at all, rather than the site itself being
+# broken. navigator.webdriver=true is the most common single marker
+# (WebDriver-based tools set it deliberately per spec); the other patches
+# below cover several more of the well-known headless-Chromium tells.
+_STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+window.chrome = window.chrome || { runtime: {} };
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters)
+);
+"""
+
+
 def _new_context(p, headless=True, fresh=False):
     """fresh=True skips loading any existing storage_state.json, even if
     has_session() is True - used by login_start() so an explicit "log me
@@ -70,12 +98,16 @@ def _new_context(p, headless=True, fresh=False):
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
+        "--disable-blink-features=AutomationControlled",
         "--js-flags=--max-old-space-size=128",
     ])
     ctx = browser.new_context(
         storage_state=AUTH_STATE_PATH if (has_session() and not fresh) else None,
         viewport={"width": 1400, "height": 900},
+        user_agent=_REAL_USER_AGENT,
+        locale="en-US",
     )
+    ctx.add_init_script(_STEALTH_INIT_SCRIPT)
     return browser, ctx
 
 
@@ -137,6 +169,28 @@ def _click_clean(page, locator, max_tries=5):
         page.wait_for_timeout(400)
         return True
     return False
+
+
+def _click_login_button(page):
+    """Confirmed live: _click_clean() (bounding_box() + an elementFromPoint
+    evaluate() before clicking) silently prevented this specific button's
+    click from reaching Alhind's login API at all - zero network requests
+    fired, no error, nothing. A plain page.click(force=True) with no
+    extra JS evaluation in between fill() and click() does fire the real
+    request. Not fully understood why this one button differs from every
+    other _click_clean() use on this site that's worked fine, but this is
+    the proven-working path, so it's used here rather than the general
+    helper.
+
+    No-ops if the button isn't there - callers use this as a "nudge" retry
+    partway through waiting for the login to take effect, and if the
+    button's already gone, that means an earlier click DID register and
+    the page has moved on; retrying would just hit a timeout waiting for
+    a button that's no longer coming back."""
+    btn = page.locator("button:has-text('LOGIN')")
+    if btn.count() == 0:
+        return
+    btn.first.click(force=True, timeout=3000)
 
 
 def _dismiss_alert(page):
@@ -201,23 +255,43 @@ def login_start(username, password):
 
         page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
         page.fill("input[placeholder='Password']", password)
-        _click_clean(page, page.locator("button:has-text('LOGIN')"))
-        # Poll rather than a flat wait - confirmed live (same issue fixed
-        # in the routine-relogin path) that a couple of seconds isn't
-        # always enough for the OTP screen to actually render, which was
-        # raising "Unexpected page after login" and killing the whole OTP
-        # flow before it had a real chance to appear.
+        _click_login_button(page)
+        # Confirmed live: the LOGIN click itself is genuinely flaky - the
+        # exact same click sometimes fires the real login request and
+        # sometimes visibly does nothing at all (no request, no state
+        # change), same class of unreliability as everything else on this
+        # site. A pure wait can't fix a click that just didn't register,
+        # so this re-clicks periodically while polling, rather than
+        # trusting the first click alone.
+        # Confirmed live: checking body text for "Mobile OTP" was a
+        # fundamentally broken check the whole time, unrelated to any of
+        # the click/timing issues - "Mobile OTP" is that input's
+        # `placeholder` attribute, and placeholder text is never part of
+        # innerText in any browser. The OTP screen was often already
+        # showing (confirmed via a body dump - the retype-value and
+        # "VERIFY OTP" button were right there) while this check kept
+        # reporting failure. Checking for the actual input element
+        # instead of scanning for text that could never appear.
         otp_screen_shown = False
-        for _ in range(16):
+        for i in range(16):
             page.wait_for_timeout(500)
-            if "Mobile OTP" in page.inner_text("body"):
+            if page.locator("input[placeholder='Mobile OTP']").count() > 0:
                 otp_screen_shown = True
                 break
+            if i in (5, 10):  # ~2.5s and ~5s in - give it a nudge
+                _click_login_button(page)
 
         if not otp_screen_shown:
+            title = page.title()
+            try:
+                body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
+            except Exception as e:
+                body_snippet = f"(couldn't read body: {e})"
+            print(f"[alhind_client] login_start: OTP screen never appeared - "
+                  f"url={page.url!r} title={title!r} body_start={body_snippet!r}", flush=True)
             browser.close()
             p.stop()
-            raise RuntimeError(f"Unexpected page after login: {page.title()}")
+            raise RuntimeError(f"Unexpected page after login: {title}")
 
         _pending_login.update({
             "browser": browser, "playwright": p, "page": page, "context": ctx,
@@ -263,11 +337,13 @@ def login_verify(otp):
             password = _pending_login.get("password")
             page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
             page.fill("input[placeholder='Password']", password)
-            _click_clean(page, page.locator("button:has-text('LOGIN')"))
-            for _ in range(16):
+            _click_login_button(page)
+            for i in range(16):
                 page.wait_for_timeout(500)
                 if "TLogin" not in page.url:
                     break
+                if i in (5, 10):
+                    _click_login_button(page)
             ok = "TLogin" not in page.url
 
         if ok:
@@ -484,17 +560,21 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
     if "TLogin" in page.url:
         page.fill("input[placeholder='Enter Mobile Number/ Email ID']", username)
         page.fill("input[placeholder='Password']", password)
-        _click_clean(page, page.locator("button:has-text('LOGIN')"))
+        _click_login_button(page)
         # Poll rather than a fixed sleep - confirmed live (twice) that
         # even a few seconds isn't always enough for the redirect to
         # complete, causing a false "not_registered" when the login would
         # have succeeded a moment later. This only costs time on an
         # actual relogin (rare relative to the per-date search budget),
-        # so it's fine to be generous here specifically.
-        for _ in range(16):
+        # so it's fine to be generous here specifically. Also confirmed
+        # live: the click itself can silently not register at all, so
+        # this re-clicks partway through rather than trusting one click.
+        for i in range(16):
             page.wait_for_timeout(500)
             if "TLogin" not in page.url:
                 break
+            if i in (5, 10):
+                _click_login_button(page)
         if "TLogin" in page.url:
             raise RuntimeError("not_registered")
         ctx.storage_state(path=AUTH_STATE_PATH)
