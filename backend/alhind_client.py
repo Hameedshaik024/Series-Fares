@@ -351,7 +351,11 @@ def login_verify(otp):
         page.fill("input[placeholder='Mobile OTP']", otp)
         if displayed:
             page.fill("input[placeholder='Enter Above Value']", displayed)
-        _click_clean(page, page.locator("button:has-text('VERIFY OTP')"))
+        # Plain click, not _click_clean() - confirmed live that helper
+        # (bounding_box() + an elementFromPoint evaluate() before
+        # clicking) silently prevents the LOGIN button's click from
+        # firing at all; same risk here, same fix.
+        page.click("button:has-text('VERIFY OTP')", force=True)
         # Generous flat wait, not a poll: there's no single target URL to
         # watch for here (success could land on the app itself OR bounce
         # to the "Kindly Re-Login Now" form, both are valid outcomes
@@ -379,6 +383,14 @@ def login_verify(otp):
                 if i in (5, 10):
                     _click_login_button(page)
             ok = login_field.count() == 0
+
+        if not ok:
+            try:
+                body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
+            except Exception as e:
+                body_snippet = f"(couldn't read body: {e})"
+            print(f"[alhind_client] login_verify: giving up - "
+                  f"url={page.url!r} title={page.title()!r} body_start={body_snippet!r}", flush=True)
 
         if ok:
             ctx.storage_state(path=AUTH_STATE_PATH)
