@@ -269,29 +269,36 @@ def _run_alhind_named_job(job_id, group_key, theme="sunset"):
     route_total = len(routes)
     results = {}
     posters = []
+    labels = [f"{r['origin_code']}-{r['dest_code']} {r['flight_no']} {r['fare_type']}" for r in routes]
 
-    for idx, route in enumerate(routes, start=1):
-        label = f"{route['origin_code']}-{route['dest_code']} {route['flight_no']} {route['fare_type']}"
+    def progress_cb(route_idx, _route_total, day, total, status):
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = {
+                "route": labels[route_idx - 1], "route_num": route_idx, "route_total": route_total,
+                "day": day, "total": total, "last_status": status,
+            }
 
-        def progress_cb(day, total, status, _idx=idx, _label=label):
-            with _jobs_lock:
-                _jobs[job_id]["progress"] = {
-                    "route": _label, "route_num": _idx, "route_total": route_total,
-                    "day": day, "total": total, "last_status": status,
-                }
+    try:
+        # Scrapes all routes sharing ONE browser session, rather than a
+        # fresh session (and fresh login) per route - confirmed live this
+        # matters a lot: 6 separate sessions meant up to 6x the relogin
+        # attempts, and Alhind started requiring a fresh device-
+        # verification OTP on many of them (a stream of unsolicited OTP
+        # texts, and most routes silently failing since a mid-scrape OTP
+        # prompt can't be completed unattended).
+        raw_by_route = alhind_client.scrape_named_flight_ranges(
+            username=ALHIND_USER, password=ALHIND_PASS,
+            routes=routes, dates=dates, progress_cb=progress_cb,
+        )
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+        return
 
-        try:
-            raw = alhind_client.scrape_named_flight_range(
-                username=ALHIND_USER, password=ALHIND_PASS,
-                origin_search=route["origin_search"], origin_option_text=route["origin_option"],
-                dest_search=route["dest_search"], dest_option_text=route["dest_option"],
-                dates=dates, flight_no=route["flight_no"], fare_type=route["fare_type"],
-                progress_cb=progress_cb,
-            )
-        except Exception as e:
-            results[label] = {"error": str(e)}
-            continue
-
+    for idx, route in enumerate(routes):
+        label = labels[idx]
+        raw = raw_by_route.get(idx, {})
         priced_days = [_alhind_flight_to_poster_entry(d, raw[d.isoformat()])
                         for d in dates if raw.get(d.isoformat())]
         if not priced_days:

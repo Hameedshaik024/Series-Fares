@@ -702,59 +702,121 @@ def search_named_flight_fare(username, password, origin_search, origin_option_te
         return result
 
 
+def _scrape_dates_for_route(page, ctx, username, password, origin_search, origin_option_text,
+                             dest_search, dest_option_text, flight_no, fare_type, dates,
+                             progress_cb=None):
+    """One route, every date, on an already-open page/browser. Shared by
+    scrape_named_flight_range (one route, its own browser) and
+    scrape_named_flight_ranges (multiple routes, one shared browser) so
+    the retry logic only lives in one place.
+
+    Confirmed live that a search can transiently come back empty for a
+    date that genuinely has the flight/fare (re-running the identical
+    search recovered it) - same class of flakiness seen on AirIQ. Retries
+    once before accepting "not found" as real. _search_once() handles
+    session expiry itself (relogs in transparently) - no separate
+    recovery step needed here.
+
+    progress_cb(day_idx, day_total, status) - status one of "ok" /
+    "not_found" / "error"."""
+    results = {}
+    total = len(dates)
+
+    for idx, date in enumerate(dates, start=1):
+        key = date.isoformat()
+        result = None
+        status = "not_found"
+
+        for attempt in range(2):
+            try:
+                result = _search_once(page, ctx, username, password,
+                                       origin_search, origin_option_text,
+                                       dest_search, dest_option_text, date, flight_no, fare_type)
+                status = "ok" if result else "not_found"
+                if result:
+                    break
+            except Exception:
+                status = "error"
+            if attempt == 0:
+                page.wait_for_timeout(1000)
+
+        results[key] = result
+        if progress_cb:
+            progress_cb(idx, total, status)
+
+    return results
+
+
 def scrape_named_flight_range(username, password, origin_search, origin_option_text,
                                dest_search, dest_option_text, dates, flight_no, fare_type,
                                progress_cb=None):
     """Same named-flight/fare-class lookup as search_named_flight_fare,
     across a whole list of dates, sharing ONE browser (same memory
     rationale as airiq_client.scrape_multiple_routes) rather than
-    launching Chromium per date.
-
-    Confirmed live that a search can transiently come back empty for a
-    date that genuinely has the flight/fare (re-running the identical
-    search recovered it) - same class of flakiness seen on AirIQ. Retries
-    once before accepting "not found" as real. Also confirmed Alhind's
-    session token expires faster than AirIQ's mid-scrape; a search that
-    unexpectedly lands back on the login page triggers one plain relogin
-    (no OTP needed) and a retry of that date, rather than failing the
-    whole run.
-
-    progress_cb(day_idx, day_total, status) - status one of "ok" /
-    "not_found" / "error".
+    launching Chromium per date. For MULTIPLE routes, use
+    scrape_named_flight_ranges instead - it shares one session across all
+    of them too, which matters a lot for how often a relogin (and its OTP
+    risk) gets triggered.
 
     Returns {date.isoformat(): matched_flight_dict_or_None}."""
-    results = {}
-    total = len(dates)
+    with sync_playwright() as p:
+        browser, ctx = _new_context(p, headless=True)
+        page = ctx.new_page()
+        results = _scrape_dates_for_route(page, ctx, username, password,
+                                           origin_search, origin_option_text,
+                                           dest_search, dest_option_text,
+                                           flight_no, fare_type, dates, progress_cb)
+        browser.close()
+
+    return results
+
+
+def scrape_named_flight_ranges(username, password, routes, dates, progress_cb=None):
+    """Same named-flight/fare-class lookup as scrape_named_flight_range,
+    but across MULTIPLE routes sharing ONE browser session for the whole
+    batch - not one fresh browser (and one fresh login) per route.
+
+    Confirmed live this matters a lot, not just for memory: running each
+    route as its own session meant up to 6x the login attempts for a
+    6-route group, and Alhind started requiring a fresh device-
+    verification OTP on many of those relogins (very likely a security
+    response to the sheer volume of automated logins across a long
+    debugging session) - since _search_once() can't complete an OTP
+    prompt mid-scrape, most routes ended up failing silently, and the
+    account's phone got a stream of unsolicited OTP texts. Sharing one
+    session across all routes cuts the number of logins needed roughly
+    6x. It doesn't eliminate relogins entirely - the ~15-20 minute
+    session lifetime still means some are unavoidable across a 60-90
+    minute run - but far fewer than before.
+
+    routes: list of dicts with keys origin_search, origin_option,
+    dest_search, dest_option, flight_no, fare_type (matches
+    named_flights.py's shape).
+
+    progress_cb(route_idx, route_total, day_idx, day_total, status)
+
+    Returns {route_index: {date.isoformat(): matched_flight_dict_or_None}}
+    keyed by each route's position in the input list."""
+    route_total = len(routes)
+    all_results = {}
 
     with sync_playwright() as p:
         browser, ctx = _new_context(p, headless=True)
         page = ctx.new_page()
 
-        for idx, date in enumerate(dates, start=1):
-            key = date.isoformat()
-            result = None
-            status = "not_found"
+        for route_idx, route in enumerate(routes, start=1):
+            def _cb(day_idx, day_total, status, _ridx=route_idx):
+                if progress_cb:
+                    progress_cb(_ridx, route_total, day_idx, day_total, status)
 
-            for attempt in range(2):
-                try:
-                    # _search_once always navigates back to the search
-                    # form first (and relogs in there if the session's
-                    # expired) - no separate recovery step needed here.
-                    result = _search_once(page, ctx, username, password,
-                                           origin_search, origin_option_text,
-                                           dest_search, dest_option_text, date, flight_no, fare_type)
-                    status = "ok" if result else "not_found"
-                    if result:
-                        break
-                except Exception:
-                    status = "error"
-                if attempt == 0:
-                    page.wait_for_timeout(1000)
-
-            results[key] = result
-            if progress_cb:
-                progress_cb(idx, total, status)
+            all_results[route_idx - 1] = _scrape_dates_for_route(
+                page, ctx, username, password,
+                route["origin_search"], route["origin_option"],
+                route["dest_search"], route["dest_option"],
+                route["flight_no"], route["fare_type"],
+                dates, _cb,
+            )
 
         browser.close()
 
-    return results
+    return all_results
