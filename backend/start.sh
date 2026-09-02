@@ -24,4 +24,15 @@ set -e
   done
 ) &
 
-exec gunicorn -b 0.0.0.0:5000 --timeout 300 --workers 1 app:app
+# --timeout is gunicorn's own "is this worker hung" watchdog - it kills
+# and restarts the worker if it doesn't check in within this window.
+# Confirmed live: the named-flight job's background thread (a 60-90
+# minute Playwright-heavy job running inside this same worker process)
+# can hold Python's GIL busy long enough that the worker misses its
+# check-in even though it's doing legitimate work, not actually hung -
+# gunicorn then force-restarts the worker, wiping the in-memory job store
+# and killing the job mid-run (surfaced to the frontend as "lost
+# connection to the server"). 300s was sized for normal request handling,
+# not a long background job sharing the same process; bumped well past
+# the longest job this app runs.
+exec gunicorn -b 0.0.0.0:5000 --timeout 7200 --workers 1 app:app
