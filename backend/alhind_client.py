@@ -47,6 +47,19 @@ _lock = threading.Lock()
 _pending_login = {"browser": None, "playwright": None, "page": None, "context": None,
                    "username": None, "password": None}
 
+LOGIN_FIELD = "input[placeholder='Enter Mobile Number/ Email ID']"
+OTP_FIELD = "input[placeholder='Mobile OTP']"
+
+
+class OtpRequired(RuntimeError):
+    """Alhind wants a fresh device-verification OTP. Never transient:
+    retrying only resubmits the login form (and can text another OTP
+    each time), so scrapes stop on this rather than retrying every date,
+    and a human has to complete login_start()/login_verify()."""
+
+    def __init__(self):
+        super().__init__("otp_required")
+
 
 def has_session():
     return os.path.exists(AUTH_STATE_PATH)
@@ -311,13 +324,18 @@ def login_start(username, password):
         # "VERIFY OTP" button were right there) while this check kept
         # reporting failure. Checking for the actual input element
         # instead of scanning for text that could never appear.
+        # Bumped from 16*0.5s=8s to 30*1s=30s - confirmed live the login
+        # click can genuinely take upwards of 15-20s to actually surface
+        # the OTP screen (slow backend, not a stuck click), so 8s was
+        # bailing out and raising "Unexpected page after login" on
+        # attempts that would have succeeded with a little more patience.
         otp_screen_shown = False
-        for i in range(16):
-            page.wait_for_timeout(500)
+        for i in range(30):
+            page.wait_for_timeout(1000)
             if page.locator("input[placeholder='Mobile OTP']").count() > 0:
                 otp_screen_shown = True
                 break
-            if i in (5, 10):  # ~2.5s and ~5s in - give it a nudge
+            if i in (5, 12, 20):  # ~6s, ~13s, ~21s in - give it a nudge
                 _click_login_button(page)
 
         if not otp_screen_shown:
@@ -373,14 +391,24 @@ def login_verify(otp):
         # checked below) - but confirmed live this step needs real time
         # to settle, same as the other login steps.
         page.wait_for_timeout(5000)
+        # Confirmed live (Oct 2026): the VERIFY click can silently not
+        # register, leaving the OTP screen up with the code still filled
+        # in. That screen has no login field either, so the check below
+        # used to call it a success - and every search then failed on
+        # the OTP screen. Re-click while it's still showing.
+        for _ in range(2):
+            if page.locator(OTP_FIELD).count() == 0:
+                break
+            page.click("button:has-text('VERIFY OTP')", force=True)
+            page.wait_for_timeout(5000)
 
         # Confirmed live: page.url isn't a reliable "still on the login
         # form" signal - Alhind's app doesn't consistently redirect to a
         # distinct login URL. Checking for the actual login field's
         # presence instead, same fix as login_start().
-        ok = True
+        ok = page.locator(OTP_FIELD).count() == 0
         login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
-        if login_field.count() > 0:
+        if ok and login_field.count() > 0:
             username = _pending_login.get("username")
             password = _pending_login.get("password")
             # Confirmed live: even with nudge-retries, this follow-up
@@ -412,6 +440,11 @@ def login_verify(otp):
                     _dismiss_alert(page)
             ok = login_field.count() == 0
 
+        # Neither check above proves we're in - only the search form
+        # itself showing up does.
+        if ok:
+            ok = _search_form_ready(page)
+
         if not ok:
             try:
                 body_snippet = page.inner_text("body")[:400].replace("\n", " | ")
@@ -425,6 +458,25 @@ def login_verify(otp):
 
         _cleanup_pending_login()
         return {"status": "ok" if ok else "invalid_or_expired_otp"}
+
+
+def _search_form_ready(page, timeout_s=20):
+    """True once Alhind's flight search form is actually showing - the one
+    reliable "logged in" signal (the OTP screen has no login field
+    either, and the URL doesn't change)."""
+    if page.locator(".cityName").count() == 0:
+        # goto() to the identical "#/Home/Air" URL is a no-op (see
+        # _search_once) - reload() is what actually re-renders it.
+        if "#/Home/Air" in page.url:
+            page.reload(wait_until="load", timeout=45000)
+        else:
+            page.goto(HOME_URL, wait_until="load", timeout=45000)
+    for _ in range(timeout_s):
+        _dismiss_alert(page)
+        if page.locator(".cityName").count() > 0:
+            return True
+        page.wait_for_timeout(1000)
+    return False
 
 
 def _cleanup_pending_login():
@@ -446,7 +498,20 @@ def _cleanup_pending_login():
 
 # ---------- Route + date selection ----------
 
-def _select_route_and_date(page, origin_search, origin_option_text, dest_search, dest_option_text, date):
+def _date_selected(page, day_button, date):
+    """Confirmed live (Oct 2026): the calendar now closes itself as soon
+    as a day is clicked (moving straight on to the travellers popup), so
+    the clicked cell's aria-pressed can no longer be read afterwards -
+    waiting on it just timed out every search. While the calendar is
+    still open, aria-pressed is the check; once it's closed, the DEPART
+    field's own "19 Oct 26"-style text is."""
+    if page.locator(".mat-calendar-body-cell").count() > 0 and day_button.count() > 0:
+        return day_button.get_attribute("aria-pressed", timeout=2000) == "true"
+    depart = rf"\b{date.day}\s+{date.strftime('%b')}\s+{date.strftime('%y')}\b"
+    return re.search(depart, page.inner_text("body")) is not None
+
+
+def _select_route_and_date(page,origin_search, origin_option_text, dest_search, dest_option_text, date):
     _open_city_dropdown(page, 0)
     page.fill("input[placeholder='Start typing...']", origin_search)
     page.wait_for_timeout(700)
@@ -464,6 +529,21 @@ def _select_route_and_date(page, origin_search, origin_option_text, dest_search,
     # rest of this app's custom widgets) - confirmed live via its DOM:
     # reliable .mat-calendar-period-button / -next-button / -previous-button
     # selectors, no overlay-backdrop quirk to work around here.
+    #
+    # Wait for it to actually render before reading its month label -
+    # confirmed live this is a real race: the fixed 500ms wait above
+    # isn't always enough, and the month-check loop below was treating
+    # "calendar not visible yet" (0 matches) exactly the same as
+    # "already on the target month" (its break condition), silently
+    # skipping navigation it should have done and leaving the calendar
+    # on whatever month it happened to default to.
+    for _ in range(20):
+        if page.locator(".mat-calendar-body-cell").count() > 0:
+            break
+        page.wait_for_timeout(500)
+    else:
+        raise RuntimeError("Alhind's date-picker calendar never rendered")
+
     for _ in range(24):  # safety cap: 2 years
         label_el = page.locator(".mat-calendar-period-button span[aria-hidden='true']").first
         if label_el.count() == 0:
@@ -480,9 +560,42 @@ def _select_route_and_date(page, origin_search, origin_option_text, dest_search,
     else:
         raise RuntimeError(f"Could not navigate Alhind's calendar to {date}")
 
-    day_str = str(date.day)
-    _click_clean(page, page.get_by_text(day_str, exact=True).first)
+    # NOT page.get_by_text(day_str, exact=True) over the whole page - an
+    # unscoped exact-text "18" search risks matching something else on
+    # the page entirely, silently leaving the calendar on whatever date
+    # it last had selected (no error, just a wrong-date search that
+    # looks completely normal downstream) - confirmed live this is very
+    # likely why the same fare value was seen repeating across several
+    # genuinely different target dates. Each day cell is a real <button
+    # class="mat-calendar-body-cell" aria-label="18 September 2026">
+    # (confirmed live via the actual DOM) - the aria-label spells out the
+    # full date, so matching on that is unambiguous by construction,
+    # unlike the bare visible day number.
+    #
+    # get_by_role(name=...), NOT a raw CSS [aria-label='...'] attribute
+    # selector - confirmed live the latter times out despite the label
+    # visibly matching, almost certainly some internal whitespace (e.g.
+    # a non-breaking space) that isn't byte-identical to a plain Python-
+    # built string. get_by_role() matches the accessible name with
+    # normalized whitespace, which is exactly what's needed here.
+    expected_label = f"{date.day} {date.strftime('%B')} {date.year}"
+    day_button = page.get_by_role("button", name=expected_label, exact=True).first
+    if day_button.count() == 0:
+        raise RuntimeError(f"Calendar has no cell for {date} (looked for aria-label={expected_label!r})")
+    if day_button.get_attribute("aria-disabled") == "true":
+        raise RuntimeError(f"Calendar cell for {date} is disabled (aria-label={expected_label!r})")
+    _click_clean(page, day_button)
     page.wait_for_timeout(500)
+
+    # Verify the click actually registered rather than trusting it -
+    # retries once, then fails loudly instead of silently searching a
+    # stale date.
+    if not _date_selected(page, day_button, date):
+        if day_button.count() > 0:
+            _click_clean(page, day_button)
+            page.wait_for_timeout(500)
+        if not _date_selected(page, day_button, date):
+            raise RuntimeError(f"Calendar didn't confirm selecting {date} (aria-label={expected_label!r})")
 
     _ensure_direct_flight_checked(page)
 
@@ -571,36 +684,120 @@ def _normalize(text):
     return re.sub(r"\s+", "", (text or "")).lower()
 
 
-def find_named_fare(flights, flight_no, fare_type):
-    """flights: output of _extract_flights(). Finds the flight matching
-    flight_no (e.g. "6E 1273", whitespace/case-insensitive) and returns
-    its cheapest fare option matching fare_type (e.g. "Tactical") - a
-    flight can list the same fare_type twice at different prices (seen
-    live: two "Tactical" options), so this picks the cheaper one rather
-    than assuming there's only one."""
-    target_no = _normalize(flight_no)
-    target_type = _normalize(fare_type)
+def _parse_baggage_kg(baggage_str):
+    """"30kg" -> 30, "25 Kg" -> 25, "No Baggage"/"No Freebag"/None -> None."""
+    if not baggage_str:
+        return None
+    m = re.search(r"(\d+)\s*kg", baggage_str, re.I)
+    return int(m.group(1)) if m else None
 
+
+def _is_zero_baggage(baggage_str):
+    """True for "0kg", "No Baggage", "No Freebag" - a hand-baggage-only
+    fare. Baggage is extracted once per flight CARD (not per fare
+    bucket), so this excludes a card whose displayed allowance is zero -
+    used to make sure a "lowest fare of any class" pick never lands on a
+    cheap-but-no-checked-baggage fare bucket."""
+    if not baggage_str:
+        return False
+    if re.search(r"no\s*(baggage|freebag)", baggage_str, re.I):
+        return True
+    return _parse_baggage_kg(baggage_str) == 0
+
+
+def _cheapest_of(candidates):
+    """candidates: list of (price, flight, fare) - returns the poster-
+    ready dict for the cheapest one, or None if the list is empty."""
+    if not candidates:
+        return None
+    price, flight, fare = min(candidates, key=lambda c: c[0])
+    return {
+        "airline": flight["airline"],
+        "flight_no": flight["flight_no"],
+        "logo_url": flight["logo_url"],
+        "dep_time": flight["dep_time"],
+        "arr_time": flight["arr_time"],
+        "duration": flight["duration"],
+        "baggage": flight["baggage"],
+        "stops": flight["stops"],
+        "fare_type": fare["type"],
+        "fare_inr": price,
+    }
+
+
+def find_named_fare(flights, flight_no, fare_type=None):
+    """flights: output of _extract_flights(). Finds the flight(s) matching
+    flight_no and returns the single cheapest fare option among them.
+
+    flight_no: a flight number (e.g. "6E 1273", whitespace/case-
+        insensitive), or a list of alternatives (e.g. ["6E 1485",
+        "1X 921"]) when the same route is sometimes filed under a
+        different code - any of them matches.
+    fare_type: a specific fare-class name (e.g. "Tactical") to require -
+        a flight can list the same fare_type twice at different prices
+        (seen live: two "Tactical" options), so this picks the cheaper
+        one rather than assuming there's only one. Pass None (or omit)
+        to instead take the single cheapest fare of ANY class on the
+        matching flight(s) - "whatever's lowest today". Either way, a
+        card with a 0kg/hand-baggage-only allowance is never picked -
+        confirmed live that "lowest fare of any class" without this
+        exclusion could land on a technically-cheaper no-checked-baggage
+        fare bucket, which isn't the deal this is meant to advertise."""
+    target_nos = {_normalize(n) for n in flight_no} if isinstance(flight_no, (list, tuple)) \
+        else {_normalize(flight_no)}
+    target_type = _normalize(fare_type) if fare_type else None
+
+    candidates = []
     for flight in flights:
-        if _normalize(flight.get("flight_no")) != target_no:
+        if _normalize(flight.get("flight_no")) not in target_nos:
             continue
-        matching_fares = [f for f in flight["fares"] if _normalize(f["type"]) == target_type]
-        if not matching_fares:
+        if _is_zero_baggage(flight.get("baggage")):
             continue
-        cheapest = min(matching_fares, key=lambda f: _parse_price(f["price"]) or float("inf"))
-        return {
-            "airline": flight["airline"],
-            "flight_no": flight["flight_no"],
-            "logo_url": flight["logo_url"],
-            "dep_time": flight["dep_time"],
-            "arr_time": flight["arr_time"],
-            "duration": flight["duration"],
-            "baggage": flight["baggage"],
-            "stops": flight["stops"],
-            "fare_type": cheapest["type"],
-            "fare_inr": _parse_price(cheapest["price"]),
-        }
-    return None
+        fares = flight["fares"] if target_type is None \
+            else [f for f in flight["fares"] if _normalize(f["type"]) == target_type]
+        for f in fares:
+            price = _parse_price(f["price"])
+            if price is not None:
+                candidates.append((price, flight, f))
+
+    return _cheapest_of(candidates)
+
+
+def find_fallback_fare(flights, baggage_kg_options=(25, 30)):
+    """flights: output of _extract_flights(). Used when the specifically
+    named flight isn't on offer that date - rather than leaving the
+    poster cell blank, finds the single cheapest fare among ALL flights
+    (any airline/flight number) whose baggage allowance is one of
+    baggage_kg_options, so the date still gets a real, bookable fare."""
+    candidates = []
+    for flight in flights:
+        if _parse_baggage_kg(flight.get("baggage")) not in baggage_kg_options:
+            continue
+        for f in flight["fares"]:
+            price = _parse_price(f["price"])
+            if price is not None:
+                candidates.append((price, flight, f))
+
+    return _cheapest_of(candidates)
+
+
+def find_any_fare(flights):
+    """Last-resort fallback: the single cheapest fare among ALL flights
+    on the page, no flight-number filter at all (still excludes 0kg/
+    hand-baggage-only cards, same as find_named_fare). Only reached when
+    both the named flight AND the 25kg/30kg fallback found nothing -
+    guarantees a date is only left blank when the search genuinely
+    returned zero flights with any real checked baggage."""
+    candidates = []
+    for flight in flights:
+        if _is_zero_baggage(flight.get("baggage")):
+            continue
+        for f in flight["fares"]:
+            price = _parse_price(f["price"])
+            if price is not None:
+                candidates.append((price, flight, f))
+
+    return _cheapest_of(candidates)
 
 
 def _search_once(page, ctx, username, password, origin_search, origin_option_text,
@@ -649,15 +846,26 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
         # so it's fine to be generous here specifically. Also confirmed
         # live: the click itself can silently not register at all, so
         # this re-clicks partway through rather than trusting one click.
-        for i in range(16):
-            page.wait_for_timeout(500)
+        for i in range(30):
+            page.wait_for_timeout(1000)
             login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
             if login_field.count() == 0:
                 break
-            if i in (5, 10):
+            if i in (5, 12, 20):
                 _click_login_button(page)
         if login_field.count() > 0:
             raise RuntimeError("not_registered")
+        # Confirmed live: the login field disappearing does NOT always
+        # mean login succeeded - Alhind can also land on the OTP-entry
+        # screen instead (a different field, so login_field.count()==0
+        # either way). Without this check, the code below would try to
+        # search on what's actually the OTP page and fail with an opaque
+        # error on every date until the caller gives up - this raises a
+        # specific, clear error immediately instead. An unattended scrape
+        # can't complete an OTP prompt, so this route needs a human to
+        # run login_start()/login_verify() again before retrying.
+        if page.locator("input[placeholder='Mobile OTP']").count() > 0:
+            raise OtpRequired()
         ctx.storage_state(path=AUTH_STATE_PATH)
 
     _select_route_and_date(page, origin_search, origin_option_text,
@@ -673,8 +881,12 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
     page.wait_for_timeout(1500)
     _dismiss_alert(page)  # the one-time "Disclaimer" popup
 
+    # Bumped from 15 to 20 iterations (~22.5s -> 30s) - a date coming back
+    # with zero results was sometimes just a slow render, not genuinely
+    # zero flights, confirmed by re-checking one live; more patience here
+    # catches those before ever falling through to "not found".
     found = False
-    for _ in range(15):
+    for _ in range(20):
         body_text = page.inner_text("body")
         if "Select" in body_text and re.search(r"₹[\d,]+", body_text):
             found = True
@@ -684,7 +896,14 @@ def _search_once(page, ctx, username, password, origin_search, origin_option_tex
     if not found:
         return None
     flights = _extract_flights(page)
-    return find_named_fare(flights, flight_no, fare_type)
+    # If the specifically named flight isn't offered this date, fall back
+    # to the cheapest 25kg/30kg-baggage fare (any airline); if even that
+    # finds nothing, fall back once more to the single cheapest fare of
+    # ANY flight on the page - so a date only ever comes back empty when
+    # the search itself genuinely returned zero flights.
+    return (find_named_fare(flights, flight_no, fare_type)
+            or find_fallback_fare(flights)
+            or find_any_fare(flights))
 
 
 def search_named_flight_fare(username, password, origin_search, origin_option_text,
@@ -713,9 +932,11 @@ def _scrape_dates_for_route(page, ctx, username, password, origin_search, origin
     Confirmed live that a search can transiently come back empty for a
     date that genuinely has the flight/fare (re-running the identical
     search recovered it) - same class of flakiness seen on AirIQ. Retries
-    once before accepting "not found" as real. _search_once() handles
-    session expiry itself (relogs in transparently) - no separate
-    recovery step needed here.
+    twice (3 attempts total) before accepting "not found" as real -
+    bumped from a single retry since a genuinely blank poster date is
+    worse than the extra time this costs. _search_once() handles session
+    expiry itself (relogs in transparently) - no separate recovery step
+    needed here.
 
     progress_cb(day_idx, day_total, status) - status one of "ok" /
     "not_found" / "error"."""
@@ -727,7 +948,7 @@ def _scrape_dates_for_route(page, ctx, username, password, origin_search, origin
         result = None
         status = "not_found"
 
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 result = _search_once(page, ctx, username, password,
                                        origin_search, origin_option_text,
@@ -735,9 +956,11 @@ def _scrape_dates_for_route(page, ctx, username, password, origin_search, origin
                 status = "ok" if result else "not_found"
                 if result:
                     break
+            except OtpRequired:
+                raise
             except Exception:
                 status = "error"
-            if attempt == 0:
+            if attempt < 2:
                 page.wait_for_timeout(1000)
 
         results[key] = result
@@ -818,5 +1041,129 @@ def scrape_named_flight_ranges(username, password, routes, dates, progress_cb=No
             )
 
         browser.close()
+
+    return all_results
+
+
+# Set once a keep-alive ping (or anything else) discovers Alhind wants a
+# fresh OTP - used to back off from re-submitting the login form every
+# cycle, since repeated login ATTEMPTS (not just OTP sends) still look
+# like the kind of automated pattern that got the OTP-send path rate-
+# limited once already ("You have tried otp multiple times wait
+# sometimes"). A human completing login via the app's own relogin flow
+# clears this naturally next successful ping.
+_otp_required_since = {"ts": 0}
+_OTP_BACKOFF_SECONDS = 3600
+
+
+def check_session(username, password):
+    """One-shot "can an unattended run search right now?" check, for the
+    daily poster job (daily_posters.py): loads the search page with the
+    saved session, relogs in with username+password if it died, and
+    only reports "ok" once the search form itself shows (unlike
+    keep_alive_ping's "no login field" check, which the OTP screen also
+    passes). Never requests an OTP. Saves the refreshed session on
+    success.
+
+    Returns "ok", "otp_required", "not_registered", "no_session_file",
+    or "unknown" (nothing recognisable rendered - worth one retry)."""
+    if not has_session():
+        return "no_session_file"
+
+    with sync_playwright() as p:
+        browser, ctx = _new_context(p, headless=True)
+        page = ctx.new_page()
+        try:
+            page.goto(HOME_URL, wait_until="load", timeout=45000)
+            submitted_at = None
+            for i in range(60):
+                page.wait_for_timeout(1000)
+                _dismiss_alert(page)
+                if page.locator(".cityName").count() > 0:
+                    ctx.storage_state(path=AUTH_STATE_PATH)
+                    return "ok"
+                if page.locator(OTP_FIELD).count() > 0:
+                    return "otp_required"
+                login_field = page.locator(LOGIN_FIELD)
+                if login_field.count() > 0:
+                    if submitted_at is None:
+                        login_field.fill(username)
+                        page.fill("input[placeholder='Password']", password)
+                        _click_login_button(page)
+                        submitted_at = i
+                    elif i - submitted_at in (6, 14, 22):
+                        _click_login_button(page)  # the LOGIN click is flaky, see login_start()
+                elif i == 25 and submitted_at is None:
+                    # Still blank - the render race login_start() documents.
+                    page.reload(wait_until="load", timeout=45000)
+            if page.locator(LOGIN_FIELD).count() > 0:
+                return "not_registered"
+            return "unknown"
+        finally:
+            browser.close()
+
+
+def keep_alive_ping(username, password):
+    """Gently keeps the Alhind session fresh between real scrapes, meant
+    to be called every ~10 minutes from a background thread on the
+    deployed server - NOT from the same hot path as a real scrape (skip
+    calling this while a real job is already running; two Chromium
+    instances at once risks the same OOM crash documented for the
+    WhatsApp sidecar).
+
+    Deliberately minimal: just reloads the search page (no actual
+    search), and if that shows the session is dead, submits username +
+    password AT MOST once. It NEVER calls login_start() / requests a
+    fresh OTP - that's the one thing confirmed to trigger Alhind's rate-
+    limit, so if Alhind wants OTP, this only notes that (and backs off
+    for _OTP_BACKOFF_SECONDS) rather than pushing further; only a human
+    via the app's own relogin flow can complete an OTP prompt anyway.
+
+    Returns one of: "no_session_file", "backing_off", "already_logged_in",
+    "relogged_in", "otp_required", "not_registered", or an error string
+    (never raises - a keep-alive ping failing should never crash its
+    background loop)."""
+    if not has_session():
+        return "no_session_file"
+
+    if _otp_required_since["ts"] and time.time() - _otp_required_since["ts"] < _OTP_BACKOFF_SECONDS:
+        return "backing_off"
+
+    try:
+        with sync_playwright() as p:
+            browser, ctx = _new_context(p, headless=True, fresh=False)
+            page = ctx.new_page()
+            try:
+                page.goto(HOME_URL, wait_until="load", timeout=30000)
+                page.wait_for_timeout(1500)
+                _dismiss_alert(page)
+                login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+                if login_field.count() == 0:
+                    return "already_logged_in"
+
+                login_field.fill(username)
+                page.fill("input[placeholder='Password']", password)
+                _click_login_button(page)
+                for i in range(20):
+                    page.wait_for_timeout(1000)
+                    login_field = page.locator("input[placeholder='Enter Mobile Number/ Email ID']")
+                    if login_field.count() == 0:
+                        break
+                    if i in (5, 12):
+                        _click_login_button(page)
+
+                if page.locator("input[placeholder='Mobile OTP']").count() > 0:
+                    _otp_required_since["ts"] = time.time()
+                    return "otp_required"
+                if login_field.count() > 0:
+                    return "not_registered"
+
+                ctx.storage_state(path=AUTH_STATE_PATH)
+                _otp_required_since["ts"] = 0
+                return "relogged_in"
+            finally:
+                browser.close()
+    except Exception as e:
+        return f"error: {e}"
 
     return all_results

@@ -17,9 +17,9 @@ COPY . .
 
 RUN cd whatsapp && npm install --omit=dev
 
-# storage_state.json (the AirIQ login session) and the WhatsApp link both
+# storage_state.json (the Alhind login session) and the WhatsApp link both
 # live under here; on most platforms' free tiers this disk is ephemeral
-# across redeploys, so a fresh AirIQ OTP login and a fresh WhatsApp QR
+# across redeploys, so a fresh Alhind OTP login and a fresh WhatsApp QR
 # scan will both be needed after every redeploy/restart.
 RUN mkdir -p /app/state /app/whatsapp/state
 

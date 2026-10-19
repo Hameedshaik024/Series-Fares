@@ -1,0 +1,15 @@
+{
+  "name": "Sea Sky Fare Posters",
+  "short_name": "Fare Posters",
+  "description": "Today's fare posters, ready to share on WhatsApp.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fbf4ec",
+  "theme_color": "#fbf4ec",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

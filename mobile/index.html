@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fare Posters</title>
+<meta name="description" content="Sea Sky Destinations: today's fare posters, ready to share.">
+<meta name="theme-color" content="#fbf4ec" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#17110d" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fare Posters">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fbf4ec; --surface: #fffaf5; --surface-2: #f4e9dd; --line: #ecdcca;
+    --ink: #2b1c12; --muted: #7a6455;
+    --accent: #d4592c; --accent-ink: #ffffff; --accent-soft: #fbe3d6;
+    --warn-bg: #fff1dc; --warn-ink: #8a4b08; --warn-line: #f3d6a8;
+    --danger-bg: #fde7e4; --danger-ink: #a12a1c;
+    --good: #2e7d4f;
+    --shadow: 0 1px 2px rgba(60, 30, 10, .06), 0 4px 16px rgba(60, 30, 10, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #17110d; --surface: #221a14; --surface-2: #2c221a; --line: #3a2d23;
+      --ink: #f6ece2; --muted: #b9a594;
+      --accent: #ec7a4b; --accent-ink: #1b120c; --accent-soft: #3a2418;
+      --warn-bg: #3a2a12; --warn-ink: #f5c27a; --warn-line: #5a4220;
+      --danger-bg: #3d1d18; --danger-ink: #ffb4a8;
+      --good: #7fd3a2;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  button { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  .bar {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 16px; background: var(--bg);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand img { height: 30px; width: auto; display: block; }
+  .brand span { font-weight: 650; font-size: 15px; color: var(--muted); white-space: nowrap; }
+  .bar-actions { display: flex; gap: 6px; }
+  .icon-btn {
+    display: inline-grid; place-items: center; width: 40px; height: 40px;
+    border: 1px solid var(--line); border-radius: 12px; background: var(--surface); cursor: pointer;
+  }
+  .pill {
+    border: 1px solid var(--accent); color: var(--accent); background: transparent;
+    border-radius: 999px; padding: 0 14px; height: 40px; font-weight: 650; cursor: pointer;
+  }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 16px 16px 48px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 18px;
+    box-shadow: var(--shadow);
+  }
+  .status { padding: 16px; margin-bottom: 16px; }
+  .status h2 { margin: 0; font-size: 17px; line-height: 1.3; font-weight: 650; }
+  .status .lead { display: flex; gap: 12px; align-items: flex-start; }
+  .lead-text { min-width: 0; flex: 1; }
+  .status p { margin: 4px 0 0; }
+  .status.attention { background: var(--warn-bg); border-color: var(--warn-line); }
+  .status.problem { background: var(--danger-bg); border-color: transparent; }
+  .status.problem h2 { color: var(--danger-ink); }
+  .status .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--good); margin-top: 5px; flex: none; }
+  .spinner {
+    width: 18px; height: 18px; flex: none; margin-top: 1px; border-radius: 50%;
+    border: 2.5px solid var(--accent-soft); border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+  .progress { height: 8px; border-radius: 999px; background: var(--surface-2); margin-top: 12px; overflow: hidden; }
+  .progress > i { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width .4s; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .warning-line { color: var(--warn-ink); font-size: 13px; margin-top: 10px !important; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 44px; padding: 0 18px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--surface); font-weight: 650;
+  }
+  a.btn { text-decoration: none; color: inherit; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.wide { width: 100%; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn:focus-visible, .icon-btn:focus-visible, .chip:focus-visible, .pill:focus-visible, .poster-img:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px;
+  }
+
+  .otp-form { display: flex; gap: 10px; margin-top: 14px; }
+  .otp-form input {
+    flex: 1; min-width: 0; height: 52px; border-radius: 12px; border: 1px solid var(--warn-line);
+    background: var(--surface); color: var(--ink); padding: 0 14px;
+    font-size: 24px; letter-spacing: 6px; font-variant-numeric: tabular-nums;
+  }
+  .otp-form input::placeholder { font-size: 16px; letter-spacing: normal; color: var(--muted); }
+
+  .days { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 10px; margin: 0 -2px; scrollbar-width: none; }
+  .days::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; height: 36px; padding: 0 14px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--surface); font-weight: 600; font-size: 14px;
+  }
+  .chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+  .day-actions { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 14px; }
+
+  .posters { display: grid; gap: 16px; }
+  .poster { overflow: hidden; }
+  .poster-img { display: block; width: 100%; padding: 0; border: 0; background: var(--surface-2); cursor: zoom-in; }
+  .poster-img img { display: block; width: 100%; height: auto; }
+  .poster-body { padding: 14px 16px 16px; }
+  .poster-body h2 { margin: 0; font-size: 17px; font-weight: 650; }
+  .poster-body p { margin: 2px 0 0; }
+  .notes { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+  .notes li {
+    font-size: 13px; color: var(--warn-ink); background: var(--warn-bg);
+    border: 1px solid var(--warn-line); border-radius: 10px; padding: 8px 10px;
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .empty { text-align: center; padding: 40px 16px; }
+
+  .viewer {
+    position: fixed; inset: 0; z-index: 20; background: rgba(12, 8, 5, .94);
+    overflow: auto; -webkit-overflow-scrolling: touch;
+    padding: calc(env(safe-area-inset-top) + 56px) 0 calc(env(safe-area-inset-bottom) + 88px);
+  }
+  .viewer img { display: block; width: 100%; max-width: 900px; margin: 0 auto; height: auto; }
+  .viewer-close {
+    position: fixed; top: calc(env(safe-area-inset-top) + 8px); right: 12px; z-index: 21;
+    width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgba(255,255,255,.14); color: #fff;
+    font-size: 26px; line-height: 1; cursor: pointer;
+  }
+  .viewer-actions {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px); background: linear-gradient(transparent, rgba(12,8,5,.9) 40%);
+  }
+
+  dialog {
+    width: min(560px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 20px;
+    background: var(--surface); color: var(--ink); padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,.25);
+  }
+  dialog::backdrop { background: rgba(20, 12, 6, .45); }
+  dialog h2 { margin: 0 0 6px; font-size: 18px; }
+  dialog label { display: block; font-weight: 650; font-size: 14px; margin: 16px 0 6px; }
+  dialog input {
+    width: 100%; height: 46px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); padding: 0 12px; font-size: 15px;
+  }
+  dialog p { margin: 6px 0 0; }
+  dialog a { color: var(--accent); font-weight: 600; }
+  .token-status { min-height: 20px; font-size: 13px; margin-top: 8px; }
+  .token-status.ok { color: var(--good); }
+  .token-status.err { color: var(--danger-ink); }
+  .dialog-links { margin-top: 18px; display: grid; gap: 8px; font-size: 14px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 20px); transform: translateX(-50%);
+    z-index: 30; max-width: calc(100vw - 32px); background: var(--ink); color: var(--bg);
+    padding: 12px 16px; border-radius: 12px; font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.2);
+  }
+  .install-hint { margin-top: 16px; padding: 12px 14px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <img src="logo.png" alt="Sea Sky Destinations" width="80" height="30">
+    <span>Fare posters</span>
+  </div>
+  <div class="bar-actions">
+    <button class="pill" id="installBtn" hidden>Install</button>
+    <button class="icon-btn" id="refreshBtn" aria-label="Refresh">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="statusCard" class="card status" aria-live="polite"></section>
+  <nav id="days" class="days" aria-label="Choose a day" hidden></nav>
+  <div id="dayActions" class="day-actions" hidden>
+    <button class="btn primary" id="shareAllBtn">Share all to WhatsApp</button>
+    <button class="btn" id="saveAllBtn">Save all</button>
+  </div>
+  <section id="posters" class="posters" aria-label="Posters"></section>
+  <p id="empty" class="empty muted" hidden></p>
+  <div id="iosHint" class="card install-hint" hidden>
+    To put this app on your home screen: tap the <b>Share</b> button in Safari, then <b>Add to Home Screen</b>.
+    Open it from the home screen afterwards, and paste your token in its Settings there.
+  </div>
+</main>
+
+<div id="viewer" class="viewer" hidden>
+  <button class="viewer-close" id="viewerClose" aria-label="Close">&times;</button>
+  <img id="viewerImg" alt="">
+  <div class="viewer-actions">
+    <button class="btn primary" id="viewerShare">Share</button>
+    <button class="btn" id="viewerSave">Save</button>
+  </div>
+</div>
+
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <h2 id="settingsTitle">Settings</h2>
+  <p class="muted small">New posters are made automatically every morning and are ready by about 7:30 AM.</p>
+  <label for="tokenInput">GitHub token</label>
+  <input id="tokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_…">
+  <p class="muted small">Only needed for <b>Generate now</b> and for typing in Alhind OTPs. It stays on this phone.</p>
+  <div id="tokenStatus" class="token-status"></div>
+  <div class="row">
+    <button class="btn primary" id="saveTokenBtn">Save token</button>
+    <button class="btn" id="removeTokenBtn">Remove</button>
+  </div>
+  <div class="dialog-links">
+    <a id="runsLink" target="_blank" rel="noopener">Run history on GitHub</a>
+  </div>
+  <div class="row" style="grid-template-columns: 1fr;">
+    <button class="btn" id="closeSettingsBtn">Close</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

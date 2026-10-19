@@ -44,7 +44,7 @@
 <body>
 <div class="wrap">
   <h1>Sea Sky Destinations</h1>
-  <div class="sub">Next-30-days fare poster generator (AirIQ live fares)</div>
+  <div class="sub">Named-flight fare poster generator (Alhind live fares)</div>
 
   <div id="gate" class="card">
     <label for="pw">Access password</label>
@@ -54,49 +54,6 @@
   </div>
 
   <div id="app">
-    <div class="card" id="reloginCard" style="display:none;">
-      <div style="margin-bottom:12px;font-weight:700;">AirIQ session expired</div>
-      <div id="reloginStep1">
-        <button id="sendOtpBtn">Send OTP to my phone/email</button>
-      </div>
-      <div id="reloginStep2" style="display:none;">
-        <label for="otpInput">Enter the OTP</label>
-        <input type="text" id="otpInput" maxlength="6" placeholder="6-digit code">
-        <button id="verifyOtpBtn">Verify &amp; Continue</button>
-      </div>
-      <div id="reloginStatus" style="margin-top:10px;font-size:13px;"></div>
-    </div>
-
-    <div class="card">
-      <div class="row">
-        <div>
-          <label for="origin">Origin</label>
-          <select id="origin"><option>Loading…</option></select>
-        </div>
-        <div>
-          <label for="dest">Destination</label>
-          <select id="dest"><option>Select origin first</option></select>
-        </div>
-      </div>
-      <label for="theme">Theme</label>
-      <select id="theme">
-        <option value="sunset" selected>Sunset (coral)</option>
-        <option value="sky">Sky (blue)</option>
-        <option value="ocean">Ocean (dark navy)</option>
-      </select>
-      <label for="markup">Increase fare by (₹, flat, optional, on top of the automatic AirIQ markup)</label>
-      <input type="number" id="markup" placeholder="0" min="0" step="50">
-
-      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:normal;font-weight:600;color:var(--ink);margin-bottom:20px;">
-        <input type="checkbox" id="showLogo" checked style="width:auto;margin:0;">
-        Include Sea Sky logo on poster
-      </label>
-
-      <button id="generateBtn">Generate Poster</button>
-      <div id="status"></div>
-      <div id="result"></div>
-    </div>
-
     <div class="card">
       <div style="font-weight:700;margin-bottom:4px;">WhatsApp auto-post</div>
       <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">One-time setup: link WhatsApp, then find your group's ID.</div>
@@ -110,13 +67,6 @@
 
       <button class="secondary" id="showGroupsBtn" style="margin-bottom:10px;">Show my groups</button>
       <div id="waGroups" style="font-size:13px;margin-bottom:6px;"></div>
-    </div>
-
-    <div class="card">
-      <div style="font-weight:700;margin-bottom:4px;">📤 One-click send</div>
-      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">HYD &rarr; DXB, RUH &amp; MCT &middot; next 30 days &middot; AirIQ fares +&#8377;500, Market Place as-is &middot; posts each route's poster into its own WhatsApp group.</div>
-      <button id="sendWaBtn">Send HYD-DXB, HYD-RUH, HYD-MCT to WhatsApp</button>
-      <div id="waSendStatus" style="font-size:14px;margin-top:14px;min-height:20px;"></div>
     </div>
 
     <div class="card" id="alhindReloginCard" style="display:none;">
@@ -134,12 +84,12 @@
 
     <div class="card">
       <div style="font-weight:700;margin-bottom:4px;">🎯 Named-flight posters (Alhind)</div>
-      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">A specific flight + fare class per route (not the cheapest-available rule) &middot; next 30 days &middot; one poster per route, bundled into a single PDF and sent to that group's WhatsApp group. This scans many dates per route and can take 60&ndash;90+ minutes.</div>
+      <div style="color:var(--ink-secondary);font-size:13px;margin-bottom:16px;">A specific flight + fare class per route (not the cheapest-available rule) &middot; next 15 days &middot; each group is a set of posters, each poster stacking several routes into one image, sent to that group's WhatsApp group. This scans many dates per route and can take a while.</div>
       <label for="namedGroup">Group</label>
       <select id="namedGroup">
-        <option value="muscat">Muscat (6 routes)</option>
+        <option value="dubai">Dubai</option>
       </select>
-      <button id="sendNamedBtn">Generate &amp; send PDF</button>
+      <button id="sendNamedBtn">Generate &amp; send posters</button>
       <div id="namedSendStatus" style="font-size:14px;margin-top:14px;min-height:20px;"></div>
     </div>
   </div>

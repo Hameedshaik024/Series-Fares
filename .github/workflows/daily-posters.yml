@@ -1,0 +1,105 @@
+name: Daily fare posters
+
+# Makes the Dubai fare posters every morning and publishes them, together
+# with the phone app in mobile/, to GitHub Pages - see
+# backend/daily_posters.py for the details.
+#
+# Needs repo secrets ALHIND_USER, ALHIND_PASS and GH_PAT (a fine-grained
+# token for this repo with Actions, Secrets and Variables: read and write).
+# The ALHIND_STATE secret (the saved Alhind login) is written by the runs
+# themselves. Pages must be set to deploy from GitHub Actions
+# (Settings -> Pages -> Source).
+
+on:
+  schedule:
+    - cron: "7 1 * * *" # 06:37 IST (GitHub cron is UTC); off the hour, when runs start more reliably
+  workflow_dispatch: # also what the phone app's "Generate now" button triggers
+    inputs:
+      mode:
+        description: "full = make new posters, app = only republish the phone app"
+        type: choice
+        options: [full, app]
+        default: full
+  push:
+    branches: [main]
+    paths: ["mobile/**"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One run at a time - a second scrape would only log in over the first.
+concurrency:
+  group: daily-posters
+  cancel-in-progress: false
+
+env:
+  MODE: ${{ github.event_name == 'push' && 'app' || inputs.mode || 'full' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.47.0-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Install Python packages
+        run: pip install --no-cache-dir -r backend/requirements.txt pynacl==1.5.0
+
+      - name: Make posters
+        if: env.MODE == 'full'
+        env:
+          ALHIND_USER: ${{ secrets.ALHIND_USER }}
+          ALHIND_PASS: ${{ secrets.ALHIND_PASS }}
+          ALHIND_STATE: ${{ secrets.ALHIND_STATE }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}/
+        run: python backend/daily_posters.py --site site
+
+      - name: Republish the app only
+        if: env.MODE == 'app'
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}/
+        run: python backend/daily_posters.py --site site --app-only
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      # The build job leaves the phone app showing "publishing"; this
+      # closes that out either way.
+      - name: Tell the phone app
+        if: always() && env.MODE == 'full'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          phase=done
+          [ "$OUTCOME" = "success" ] || phase=failed
+          value=$(jq -nc --arg phase "$phase" \
+            --arg now "$(TZ=Asia/Kolkata date +%Y-%m-%dT%H:%M:%S%:z)" \
+            --arg run "$GITHUB_RUN_ID" \
+            --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{phase: $phase, updated: $now, run_id: $run, run_url: $url}
+             + (if $phase == "failed" then {message: "The posters were made, but publishing them failed."} else {} end)')
+          curl -sS -f -X PATCH \
+            -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/POSTERS_LIVE" \
+            -d "$(jq -nc --arg v "$value" '{name: "POSTERS_LIVE", value: $v}')" \
+            || echo "Couldn't update POSTERS_LIVE - the app will notice on its own within 15 minutes"

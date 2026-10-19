@@ -1,8 +1,8 @@
 """
-Renders a themed fare-calendar poster PNG covering a rolling range of
-dates (typically the next 30 days from today). Input is already-priced,
-already-filtered rows from pricing.pick_fare() - this module only
-renders, it makes no fare-selection decisions itself.
+Renders a themed fare-calendar poster PNG covering a range of dates.
+Input is already-priced, already-filtered rows (one already-chosen fare
+per date) - this module only renders, it makes no fare-selection
+decisions itself.
 
 Layout: a calendar grid (like a real month-view fare calendar), sized to
 span the whole requested date range even if that crosses a month
@@ -10,6 +10,12 @@ boundary. Most dates fly the same flight, so that flight's full details
 (airline logo, timing, duration, baggage) are shown once in a header
 strip; only dates flying something different get their own compact
 flight info inline in the cell.
+
+Two poster shapes:
+- build()/build_html(): one route, one full-size calendar grid.
+- build_multi()/build_html_multi(): several routes stacked as compact
+  mini-calendars in a single poster image, sharing one date range - e.g.
+  three routes all flying into (or out of) the same hub city.
 """
 import os
 import re
@@ -72,9 +78,9 @@ def _logo_b64(theme_name):
 
 
 def _normalize(text):
-    """Collapse whitespace differences (e.g. "Salam Air" vs "SalamAir")
-    between the AIR IQ and Market Place tabs so the same real-world flight
-    isn't mistaken for two different ones."""
+    """Collapse whitespace/case differences (e.g. "Salam Air" vs
+    "SalamAir") so the same real-world flight isn't mistaken for two
+    different ones."""
     return re.sub(r"\s+", "", (text or "")).lower()
 
 
@@ -113,17 +119,12 @@ def _week_grid(dates):
     return weeks
 
 
-def build_html(origin, dest, dates, priced_days, theme="sunset",
-                origin_label=None, dest_label=None, show_logo=True):
-    """
-    dates: full requested list of datetime.date (defines the grid span and
-        the header's period label, even for dates that ended up with no
-        fare and are shown as empty cells).
-    priced_days: list of {"date", "source", "flight", "base_fare",
-        "final_fare"} - already filtered (no unpriced dates).
-    """
+def _build_segment(origin, dest, dates, priced_days, theme, origin_label=None, dest_label=None):
+    """Builds the markup pieces for one route's calendar (grid rows,
+    flight-strip, period label, summary line) - shared by the single-route
+    poster (build_html) and the multi-route stacked poster
+    (build_html_multi), so both stay visually consistent."""
     t = THEMES[theme]
-    logo_b64 = _logo_b64(theme) if show_logo else None
 
     by_date = {d["date"]: d for d in priced_days}
     has_fares = bool(priced_days)
@@ -241,6 +242,26 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
         if has_fares else "No fares found for this route in the selected range"
     )
 
+    return {
+        "origin": origin, "dest": dest, "origin_label": origin_label, "dest_label": dest_label,
+        "table_rows": table_rows, "flight_strip": flight_strip, "airline_block_html": airline_block_html,
+        "period_label": period_label, "summary": summary, "has_fares": has_fares,
+    }
+
+
+def build_html(origin, dest, dates, priced_days, theme="sunset",
+                origin_label=None, dest_label=None, show_logo=True):
+    """
+    dates: full requested list of datetime.date (defines the grid span and
+        the header's period label, even for dates that ended up with no
+        fare and are shown as empty cells).
+    priced_days: list of {"date", "source", "flight", "base_fare",
+        "final_fare"} - already filtered (no unpriced dates).
+    """
+    t = THEMES[theme]
+    logo_b64 = _logo_b64(theme) if show_logo else None
+    seg = _build_segment(origin, dest, dates, priced_days, theme, origin_label, dest_label)
+
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>{origin}-{dest} Fares</title>
@@ -291,17 +312,17 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
   {f'<div class="brand-bar"><img src="data:image/png;base64,{logo_b64}" alt="logo"></div>' if show_logo else ''}
   <div class="header">
     <div>
-      <div class="route">{origin} <span class="arrow">&#9992;</span> {dest}</div>
-      <div class="subtitle">{origin_label} &rarr; {dest_label} &middot; One-way Economy Fares</div>
+      <div class="route">{seg["origin"]} <span class="arrow">&#9992;</span> {seg["dest"]}</div>
+      <div class="subtitle">{seg["origin_label"]} &rarr; {seg["dest_label"]} &middot; One-way Economy Fares</div>
     </div>
     <div>
-      <div class="period-label">{period_label}</div>
+      <div class="period-label">{seg["period_label"]}</div>
     </div>
   </div>
-  <div class="flight-strip">{airline_block_html}{flight_strip}</div>
+  <div class="flight-strip">{seg["airline_block_html"]}{seg["flight_strip"]}</div>
   <table>
     <thead><tr><th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead>
-    <tbody>{table_rows}</tbody>
+    <tbody>{seg["table_rows"]}</tbody>
   </table>
   {f'''<div class="legend">
     <div class="legend-scale">
@@ -312,8 +333,111 @@ def build_html(origin, dest, dates, priced_days, theme="sunset",
       <span class="swatch" style="background:{t["ramp"][6]}"></span>
       <span>Pricier</span>
     </div>
-    <div class="summary">{summary}</div>
-  </div>''' if has_fares else ''}
+    <div class="summary">{seg["summary"]}</div>
+  </div>''' if seg["has_fares"] else ''}
+  <div class="footer">Fares in INR, per adult, subject to availability &amp; change. Dates with no fares are left blank.</div>
+</div>
+</body>
+</html>
+"""
+    return html
+
+
+def build_html_multi(segments, dates, theme="sunset", show_logo=True, poster_title=None):
+    """
+    Several routes' fares stacked in ONE poster image, each as its own
+    compact mini-calendar sharing the same date range - e.g. three routes
+    all flying into (or out of) the same hub city.
+
+    segments: list of {"origin", "dest", "origin_label", "dest_label",
+        "priced_days"} dicts, one per route, rendered top to bottom in
+        the order given.
+    dates: the shared date range every segment's grid spans.
+    """
+    t = THEMES[theme]
+    logo_b64 = _logo_b64(theme) if show_logo else None
+
+    built = [
+        _build_segment(s["origin"], s["dest"], dates, s["priced_days"], theme,
+                        s.get("origin_label"), s.get("dest_label"))
+        for s in segments
+    ]
+
+    if dates:
+        first, last = dates[0], dates[-1]
+        period_label = f"{first.day} {MONTH_ABBR[first.month]} &ndash; {last.day} {MONTH_ABBR[last.month]} {last.year}"
+    else:
+        period_label = ""
+
+    segments_html = "\n".join(f'''
+  <div class="segment">
+    <div class="seg-header">
+      <div class="seg-route">{seg["origin"]} <span class="arrow">&#9992;</span> {seg["dest"]}</div>
+      <div class="seg-subtitle">{seg["origin_label"]} &rarr; {seg["dest_label"]}</div>
+    </div>
+    <div class="flight-strip">{seg["airline_block_html"]}{seg["flight_strip"]}</div>
+    <table>
+      <thead><tr><th>Sun</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead>
+      <tbody>{seg["table_rows"]}</tbody>
+    </table>
+    <div class="seg-summary{'' if seg["has_fares"] else ' na'}">{seg["summary"]}</div>
+  </div>''' for seg in built)
+
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Fares</title>
+<style>
+  * {{ box-sizing: border-box; margin:0; padding:0; }}
+  body {{ width: 1200px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {t["page_bg"]}; color: {t["primary"]}; }}
+  .poster {{ width: 1200px; background: {t["surface"]}; padding: 48px 64px 40px; }}
+  .brand-bar {{ display: flex; justify-content: flex-end; margin-bottom: 16px; }}
+  .brand-bar img {{ height: 42px; width: auto; }}
+  .poster-header {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid {t["border"]}; padding-bottom: 16px; margin-bottom: 28px; }}
+  .poster-title {{ font-size: 32px; font-weight: 800; letter-spacing: 0.5px; }}
+  .period-label {{ font-size: 18px; font-weight: 700; color: {t["accent"]}; text-align: right; }}
+  .segment {{ margin-bottom: 32px; padding-bottom: 32px; border-bottom: 1px solid {t["grid"]}; }}
+  .segment:last-child {{ margin-bottom: 0; padding-bottom: 0; border-bottom: none; }}
+  .seg-header {{ display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }}
+  .seg-route {{ font-size: 26px; font-weight: 800; letter-spacing: 0.3px; }}
+  .seg-route .arrow {{ color: {t["accent"]}; margin: 0 6px; }}
+  .seg-subtitle {{ font-size: 14px; color: {t["secondary"]}; font-weight: 500; }}
+  .stops-badge {{
+    font-size: 11px; font-weight: 800; padding: 3px 9px; border-radius: 999px;
+    background: {t["muted"]}; color: {t["surface"]};
+  }}
+  .stops-badge.direct {{ background: {t["badge_bg"]}; color: {t["badge_text"]}; }}
+  .flight-strip {{ display: flex; align-items: center; gap: 16px; background: {t["strip_bg"]}; border-radius: 10px; padding: 8px 18px; margin-bottom: 14px; font-size: 12px; color: {t["secondary"]}; }}
+  .flight-strip b {{ color: {t["primary"]}; }}
+  .flight-strip .sep {{ color: {t["muted"]}; margin: 0 6px; }}
+  .airline-block {{ display: flex; align-items: center; gap: 8px; flex-shrink: 0; }}
+  .airline-logo {{ height: 26px; width: 26px; object-fit: contain; border-radius: 5px; background: #fff; padding: 2px; flex-shrink: 0; }}
+  .airline-name {{ font-size: 13px; font-weight: 800; color: {t["accent"]}; }}
+  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+  th {{ font-size: 11px; color: {t["muted"]}; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; padding-bottom: 6px; text-align: center; }}
+  .cell {{ height: 78px; border: 2px solid {t["surface"]}; border-radius: 8px; text-align: center; vertical-align: middle; padding: 5px 3px; }}
+  .cell.empty {{ background: transparent; border: none; }}
+  .cell.unavailable {{ background: {t["unavail_bg"]}; color: {t["muted"]}; }}
+  .daynum {{ font-size: 12px; font-weight: 700; opacity: 0.85; margin-bottom: 2px; }}
+  .fare {{ font-size: 15px; font-weight: 800; }}
+  .fare-na {{ font-size: 13px; color: {t["muted"]}; }}
+  .cell-flight {{ display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 2px; }}
+  .cell-logo {{ height: 12px; width: 12px; object-fit: contain; border-radius: 2px; background: #fff; padding: 1px; flex-shrink: 0; }}
+  .cell-flight-text {{ font-size: 7px; font-weight: 700; opacity: 0.92; line-height: 1.2; text-align: left; }}
+  .badge {{ font-size: 8px; background: {t["badge_bg"]}; color: {t["badge_text"]}; padding: 1px 5px; border-radius: 7px; font-weight: 800; vertical-align: middle; }}
+  .seg-summary {{ margin-top: 10px; text-align: right; font-size: 12px; color: {t["secondary"]}; }}
+  .seg-summary b {{ color: {t["primary"]}; font-size: 13px; }}
+  .seg-summary.na {{ color: {t["muted"]}; }}
+  .footer {{ margin-top: 8px; font-size: 12px; color: {t["muted"]}; text-align: center; }}
+</style>
+</head>
+<body>
+<div class="poster">
+  {f'<div class="brand-bar"><img src="data:image/png;base64,{logo_b64}" alt="logo"></div>' if show_logo else ''}
+  <div class="poster-header">
+    <div class="poster-title">{poster_title or "Fares"}</div>
+    <div class="period-label">{period_label}</div>
+  </div>
+  {segments_html}
   <div class="footer">Fares in INR, per adult, subject to availability &amp; change. Dates with no fares are left blank.</div>
 </div>
 </body>
@@ -343,15 +467,6 @@ def build(origin, dest, dates, priced_days, theme="sunset", origin_label=None, d
     return render_png(html)
 
 
-def build_pdf(png_bytes_list):
-    """Combines multiple already-rendered poster PNGs into a single
-    multi-page PDF (one page per poster) - used for the named-flight
-    Alhind posters, which are bundled per group rather than sent as
-    separate images like the AirIQ WhatsApp routes are."""
-    import io
-    from PIL import Image
-
-    images = [Image.open(io.BytesIO(b)).convert("RGB") for b in png_bytes_list]
-    out = io.BytesIO()
-    images[0].save(out, format="PDF", save_all=True, append_images=images[1:])
-    return out.getvalue()
+def build_multi(segments, dates, theme="sunset", show_logo=True, poster_title=None):
+    html = build_html_multi(segments, dates, theme, show_logo, poster_title)
+    return render_png(html)
