@@ -367,12 +367,21 @@ def main():
     parser.add_argument("--app-only", action="store_true",
                         help="only republish the phone app, keeping the current posters")
     parser.add_argument("--days", type=int, default=app.NAMED_FLIGHT_DAYS_PER_POSTER)
+    parser.add_argument("--skip-if-made-today", action="store_true",
+                        help="for the scheduled runs: if today's posters are already up, only republish them")
     args = parser.parse_args()
 
     pages_url = os.environ.get("PAGES_URL", "")
     if pages_url and not pages_url.endswith("/"):
         pages_url += "/"
     args.site.mkdir(parents=True, exist_ok=True)
+
+    if args.skip_if_made_today:
+        latest = (fetch_status(pages_url).get("days") or [{}])[0]
+        if latest.get("date") == now_ist().date().isoformat():
+            print(f"Today's posters are already up (made {latest.get('generated')}) - republishing them as they are",
+                  flush=True)
+            args.app_only = True
 
     if args.app_only:
         assemble_site(args.site, pages_url)

@@ -11,8 +11,14 @@ name: Daily fare posters
 # (Settings -> Pages -> Source).
 
 on:
+  # Three chances each morning (GitHub cron is UTC; off the hour, when runs
+  # start more reliably). GitHub can start scheduled runs late - the very
+  # first one ran almost 5 hours late - so whichever starts first makes
+  # the posters, and the others see today's are up and only republish.
   schedule:
-    - cron: "7 1 * * *" # 06:37 IST (GitHub cron is UTC); off the hour, when runs start more reliably
+    - cron: "7 0 * * *" # 05:37 IST
+    - cron: "7 1 * * *" # 06:37 IST
+    - cron: "7 2 * * *" # 07:37 IST
   workflow_dispatch: # also what the phone app's "Generate now" button triggers
     inputs:
       mode:
@@ -60,7 +66,9 @@ jobs:
           ALHIND_STATE: ${{ secrets.ALHIND_STATE }}
           GH_PAT: ${{ secrets.GH_PAT }}
           PAGES_URL: ${{ steps.pages.outputs.base_url }}/
-        run: python backend/daily_posters.py --site site
+        run: >-
+          python backend/daily_posters.py --site site
+          ${{ github.event_name == 'schedule' && '--skip-if-made-today' || '' }}
 
       - name: Republish the app only
         if: env.MODE == 'app'

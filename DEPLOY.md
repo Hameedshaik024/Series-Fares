@@ -11,7 +11,9 @@ want to split it out to Netlify later — it's not used in this setup.)
 
 The simpler, free setup, with no server to keep alive:
 `.github/workflows/daily-posters.yml` runs `backend/daily_posters.py`
-every morning at 06:37 IST on GitHub Actions. It scrapes, renders the
+every morning on GitHub Actions - scheduled for 05:37, 06:37 and 07:37
+IST, since GitHub sometimes starts scheduled runs late; the first one to
+start makes the posters and the rest just republish them. It scrapes, renders the
 posters, and publishes them to GitHub Pages together with the phone app in
 `mobile/` - an installable web app (add it to the home screen) that shows
 the last 7 days of posters with Share/Save buttons, a **Generate now**
